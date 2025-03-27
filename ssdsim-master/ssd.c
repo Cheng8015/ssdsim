@@ -567,7 +567,7 @@ void trace_output(struct ssd_info* ssd){
 		end_time = 0;
 		if(req->response_time != 0)
 		{
-			fprintf(ssd->outputfile,"%16I64u %10u %6u %2u %16I64u %16I64u %10I64u\n",req->time,req->lsn, req->size, req->operation, req->begin_time, req->response_time, req->response_time-req->time);
+			fprintf(ssd->outputfile,"%16I64u %10u %6u %2u %16I64u %16I64u %10I64u %s\n",req->time,req->lsn, req->size, req->operation, req->begin_time,
 			fflush(ssd->outputfile);
 
 			if(req->response_time-req->begin_time==0)
