@@ -166,6 +166,7 @@ int set_entry_state(struct ssd_info *ssd,unsigned int lsn,unsigned int size)
 	return state;
 }
 
+
 /**************************************************
 *读请求预处理函数，当读请求所读得页里面没有数据时，
 *需要预处理网该页里面写数据，以保证能读到数据
@@ -287,6 +288,7 @@ struct ssd_info *pre_process_page(struct ssd_info *ssd)
 	
 	return ssd;
 }
+
 
 /**************************************
 *函数功能是为预处理函数获取物理页号ppn
@@ -555,6 +557,8 @@ struct ssd_info *get_ppn(struct ssd_info *ssd,unsigned int channel,unsigned int 
 
 	return ssd;
 }
+
+
 /*****************************************************************************************
 *这个函数功能是为gc操作寻找新的ppn，因为在gc操作中需要找到新的物理块存放原来物理块上的数据
 *在gc中寻找新物理块的函数，不会引起循环的gc操作
@@ -601,13 +605,13 @@ struct ssd_info *get_ppn(struct ssd_info *ssd,unsigned int channel,unsigned int 
 
 }
 
+
 /*********************************************************************************************************************
 * 朱志明 于2011年7月28日修改   
 *函数的功能就是erase_operation擦除操作，把channel，chip，die，plane下的block擦除掉
 *也就是初始化这个block的相关参数，eg：free_page_num=page_block，invalid_page_num=0，last_write_page=-1，erase_count++
 *还有这个block下面的每个page的相关参数也要修改。
 *********************************************************************************************************************/
-
 Status erase_operation(struct ssd_info * ssd,unsigned int channel ,unsigned int chip ,unsigned int die ,unsigned int plane ,unsigned int block)
 {
 	unsigned int i=0;
@@ -629,6 +633,7 @@ Status erase_operation(struct ssd_info * ssd,unsigned int channel ,unsigned int 
 	return SUCCESS;
 
 }
+
 
 /**************************************************************************************
 *这个函数的功能是处理INTERLEAVE_TWO_PLANE，INTERLEAVE，TWO_PLANE，NORMAL下的擦除的操作。

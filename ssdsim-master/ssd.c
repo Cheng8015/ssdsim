@@ -30,8 +30,10 @@ Zhiming Zhu     2012/07/19        2.1.1         Correct erase_planes()   8128398
 #include "pagemap.h"
 #include "flash.h"
 
+#define MAX_LINE_LENGTH 10000
+
 /********************************************************************************************************************************
-1，main函数中initiatio()函数用来初始化ssd,；2，make_aged()函数使SSD成为aged，aged的ssd相当于使用过一段时间的ssd，里面有失效页，
+1，main函数中initiation()函数用来初始化ssd,；2，make_aged()函数使SSD成为aged，aged的ssd相当于使用过一段时间的ssd，里面有失效页，
 non_aged的ssd是新的ssd，无失效页，失效页的比例可以在初始化参数中设置；3，pre_process_page()函数提前扫一遍读请求，把读请求
 的lpn<--->ppn映射关系事先建立好，写请求的lpn<--->ppn映射关系在写的时候再建立，预处理trace防止读请求是读不到数据；4，simulate()是
 核心处理函数，trace文件从读进来到处理完成都由这个函数来完成；5，statistic_output()函数将ssd结构中的信息输出到输出文件，输出的是
@@ -67,12 +69,14 @@ void main()
 	fprintf(ssd->outputfile,"\t\t\t\t\t\t\t\t\tOUTPUT\n");
 	fprintf(ssd->outputfile,"****************** TRACE INFO ******************\n");
 
-	ssd=simulate(ssd);
-	statistic_output(ssd);  
-/*	free_all_node(ssd);*/
 
-	printf("\n");
-	printf("the simulation is completed!\n");
+	ssd=simulate(ssd);
+	printf("The simulation completed!\n");
+
+	statistic_output(ssd);  
+	printf("The statistics analysis completed!\n");
+
+	//free_all_node(ssd);
 	system("pause");
 /* 	_CrtDumpMemoryLeaks(); */
 }
@@ -104,13 +108,21 @@ struct ssd_info *simulate(struct ssd_info *ssd)
 		return NULL;
 	}
 
-	fprintf(ssd->outputfile,"      arrive           lsn     size ope     begin time    response time    process time\n");	
+	fprintf(ssd->outputfile,"      arrive           lsn     size  ope     begin time    response time    process time      data\n");	
 	fflush(ssd->outputfile);
 
 	while(flag!=100)      
 	{
         
 		flag=get_requests(ssd);
+
+		/************ 检测是否成功建立请求队列 ************
+		while (ssd->request_queue) {
+			printf("requests: %I64u %u %d %d %s\n", ssd->request_queue->time, ssd->request_queue->lsn, ssd->request_queue->size,
+				ssd->request_queue->operation, (ssd->request_queue->data) ? ssd->request_queue->data : "(null)");
+			ssd->request_queue = ssd->request_queue->next_node;
+		}
+		****************************************************/
 
 		if(flag == 1)
 		{   
@@ -125,7 +137,8 @@ struct ssd_info *simulate(struct ssd_info *ssd)
 				no_buffer_distribute(ssd);
 			}		
 		}
-
+		
+		
 		process(ssd);    
 		trace_output(ssd);
 		if(flag == 0 && ssd->request_queue == NULL)
@@ -135,7 +148,6 @@ struct ssd_info *simulate(struct ssd_info *ssd)
 	fclose(ssd->tracefile);
 	return ssd;
 }
-
 
 
 /********    get_request    ******************************************************
@@ -151,7 +163,9 @@ struct ssd_info *simulate(struct ssd_info *ssd)
 ********************************************************************************/
 int get_requests(struct ssd_info *ssd)  
 {  
-	char buffer[200];
+	char buffer[MAX_LINE_LENGTH];
+	char* data = NULL;
+	size_t buffer_size = 0;
 	unsigned int lsn=0;
 	int device,  size, ope,large_lsn, i = 0,j=0;
 	struct request *request1;
@@ -168,10 +182,52 @@ int get_requests(struct ssd_info *ssd)
 		return 100; 
 	}
 
-
 	filepoint = ftell(ssd->tracefile);	
-	fgets(buffer, 200, ssd->tracefile); 
+
+	/***********************************************************
+	*读取一整行的踪迹及其数据内容
+	************************************************************/
+	if (!fgets(buffer, MAX_LINE_LENGTH, ssd->tracefile)) {
+		fprintf(stderr, "Error: fgets() failed to read a line!\n");
+		return 100;  // 读取失败
+	}
+
 	sscanf(buffer,"%I64u %d %d %d %d",&time_t,&device,&lsn,&size,&ope);
+
+	/**********************************************************************************
+	* 如果是写操作的话，需要读入数据块的内容到请求。FIU中的${size}固定为8。块的大小											// 2025-03-27
+	* = ${size} * 32 位的md5值。
+	***********************************************************************************/
+	// 如果ope==0，读取后面的MD5数据
+	if (ope == 0) {
+		char* md5_start = buffer;
+		// 找到第五个空格后的位置
+		for (int i = 0; i < 5; i++) {
+			md5_start = strchr(md5_start, ' ');
+			if (!md5_start) 
+				break;
+			md5_start++;
+		}
+
+		// 去除可能的前导空格复制MD5数据
+		if (md5_start) {					
+			while (*md5_start == ' ') 
+				md5_start++;
+
+			int data_length = 32 * size;
+
+			if (data) {
+				free(data);
+			}
+			data = (char*)malloc(data_length + 1);
+			if (!data) {
+				fprintf(stderr, "Memory allocation failed!\n");
+				exit(EXIT_FAILURE);
+			}
+			strncpy(data, md5_start, data_length);
+			data[data_length] = '\0';
+		}
+	}
     
 	if ((device<0)&&(lsn<0)&&(size<0)&&(ope<0))
 	{
@@ -189,6 +245,9 @@ int get_requests(struct ssd_info *ssd)
 	***********************************************************************************************************/
 	large_lsn=(int)((ssd->parameter->subpage_page*ssd->parameter->page_block*ssd->parameter->block_plane*ssd->parameter->plane_die*ssd->parameter->die_chip*ssd->parameter->chip_num)*(1-ssd->parameter->overprovide));
 	lsn = lsn%large_lsn;
+
+	//lsn地址对齐
+	lsn = lsn / 4096 * 4096;
 
 	nearest_event_time=find_nearest_event(ssd);
 	if (nearest_event_time==0x7fffffffffffffff)
@@ -237,7 +296,9 @@ int get_requests(struct ssd_info *ssd)
 		printf("error!\n");
 		while(1){}
 	}
+
 	if(feof(ssd->tracefile)){
+		printf("\n1\n");
 		request1 = NULL;
 		return 100; 
 	}
@@ -250,6 +311,22 @@ int get_requests(struct ssd_info *ssd)
 	request1->lsn = lsn;
 	request1->size = size;
 	request1->operation = ope;	
+
+	/*************************************************
+	* 如果是写请求，需要提供写入的数据
+	**************************************************/ 
+	if (request1->operation == 0) {
+		int data_length = request1->size * 32;
+		request1->data = malloc(data_length + 1);  // 一个md5值是32位 + '\0'
+		if (request1->data) {
+			strncpy(request1->data, data, data_length);  // 安全复制，防止溢出
+			request1->data[data_length] = '\0';  // 确保终止
+		}
+	}
+	else if (request1->operation == 1) {
+		request1->data = NULL;
+	}
+
 	request1->begin_time = time_t;
 	request1->response_time = 0;	
 	request1->energy_consumption = 0;	
@@ -282,15 +359,33 @@ int get_requests(struct ssd_info *ssd)
 		ssd->ave_write_size=(ssd->ave_write_size*ssd->write_request_count+request1->size)/(ssd->write_request_count+1);
 	}
 
-	
+	// 安全打印，避免 NULL 指针解引用
+	//printf("request1: %I64u %u %d %d %s\n", request1->time, request1->lsn, request1->size, request1->operation, (request1->data) ? request1->data : "(null)");
+
+
+	// 寻找下一行请求的到达时间
 	filepoint = ftell(ssd->tracefile);	
-	fgets(buffer, 200, ssd->tracefile);    //寻找下一条请求的到达时间
+	if (!fgets(buffer, MAX_LINE_LENGTH, ssd->tracefile)) {
+		if (feof(ssd->tracefile)) {
+	//		printf("[DEBUG] EOF reached.\n");
+			return 100;
+		}
+		else if (ferror(ssd->tracefile)) {
+			printf("[ERROR] File read error!\n");
+			return -1;
+		}
+		else {
+			printf("[ERROR] fgets failed for unknown reason!\n");
+			return -1;
+		}
+	}
 	sscanf(buffer,"%I64u %d %d %d %d",&time_t,&device,&lsn,&size,&ope);
 	ssd->next_request_time=time_t;
 	fseek(ssd->tracefile,filepoint,0);
 
 	return 1;
 }
+
 
 /**********************************************************************************************************************************************
 *首先buffer是个写buffer，就是为写请求服务的，因为读flash的时间tR为20us，写flash的时间tprog为200us，所以为写服务更能节省时间
@@ -307,7 +402,7 @@ struct ssd_info *buffer_management(struct ssd_info *ssd)
 {   
 	unsigned int j,lsn,lpn,last_lpn,first_lpn,index,complete_flag=0, state,full_page;
 	unsigned int flag=0,need_distb_flag,lsn_flag,flag1=1,active_region_flag=0;           
-	struct request *new_request;
+	struct request* new_request;
 	struct buffer_group *buffer_node,key;
 	unsigned int mask=0,offset1=0,offset2=0;
 
@@ -317,7 +412,13 @@ struct ssd_info *buffer_management(struct ssd_info *ssd)
 	ssd->dram->current_time=ssd->current_time;
 	full_page=~(0xffffffff<<ssd->parameter->subpage_page);
 	
-	new_request=ssd->request_tail;
+	/******************
+	*为new_request赋值																													// 2025-03-29
+	*******************/
+	new_request = (struct request*)malloc(sizeof(struct request));
+	new_request = ssd->request_tail;											
+	//printf("new_request: %I64u %u %d %d %s\n", new_request->time, new_request->lsn, new_request->size, new_request->operation, (new_request->data) ? new_request->data : "(null)");
+
 	lsn=new_request->lsn;
 	lpn=new_request->lsn/ssd->parameter->subpage_page;
 	last_lpn=(new_request->lsn+new_request->size-1)/ssd->parameter->subpage_page;
@@ -416,6 +517,8 @@ struct ssd_info *buffer_management(struct ssd_info *ssd)
 			lpn++;
 		}
 	}
+
+
 	complete_flag = 1;
 	for(j=0;j<=(last_lpn-first_lpn+1)*ssd->parameter->subpage_page/32;j++)
 	{
@@ -434,31 +537,34 @@ struct ssd_info *buffer_management(struct ssd_info *ssd)
 		new_request->begin_time=ssd->current_time;
 		new_request->response_time=ssd->current_time+1000;            
 	}
+	
+	//printf("end: %I64u %u %d %d %s\n", new_request->time, new_request->lsn, new_request->size, new_request->operation, (new_request->data) ? new_request->data : "(null)");
 
 	return ssd;
 }
 
-/*****************************
-*lpn向ppn的转换
-******************************/
-unsigned int lpn2ppn(struct ssd_info *ssd,unsigned int lsn)
+
+/**********************
+*dram中：lsn向ppn的转换
+***********************/
+unsigned int lsn2ppn(struct ssd_info *ssd,unsigned int lsn)
 {
 	int lpn, ppn;	
 	struct entry *p_map = ssd->dram->map->map_entry;
 #ifdef DEBUG
 	printf("enter lpn2ppn,  current time:%I64u\n",ssd->current_time);
 #endif
-	lpn = lsn/ssd->parameter->subpage_page;			//lpn
+	lpn = lsn/ssd->parameter->subpage_page;			//lsn->lpn
 	ppn = (p_map[lpn]).pn;
 	return ppn;
 }
+
 
 /**********************************************************************************
 *读请求分配子请求函数，这里只处理读请求，写请求已经在buffer_management()函数中处理了
 *根据请求队列和buffer命中的检查，将每个请求分解成子请求，将子请求队列挂在channel上，
 *不同的channel有自己的子请求队列
 **********************************************************************************/
-
 struct ssd_info *distribute(struct ssd_info *ssd) 
 {
 	unsigned int start, end, first_lsn,last_lsn,lpn,flag=0,flag_attached=0,full_page;
@@ -567,12 +673,13 @@ void trace_output(struct ssd_info* ssd){
 		end_time = 0;
 		if(req->response_time != 0)
 		{
-			fprintf(ssd->outputfile,"%16I64u %10u %6u %2u %16I64u %16I64u %10I64u %s\n",req->time,req->lsn, req->size, req->operation, req->begin_time,
-			fflush(ssd->outputfile);
-
+			//fprintf(ssd->outputfile, "%16I64u %10u %6u %2u %16I64u %16I64u %10I64u %s\n", req->time, req->lsn, req->size, req->operation, req->begin_time, 
+			//																			req->response_time, req->response_time - req->time, req->data);
+			//fflush(ssd->outputfile);
+			
 			if(req->response_time-req->begin_time==0)
 			{
-				printf("the response time is 0?? \n");
+				printf("the response time is 0? \n");
 				getchar();
 			}
 
@@ -659,13 +766,14 @@ void trace_output(struct ssd_info* ssd){
 
 			if (flag == 1)
 			{		
-				fprintf(ssd->outputfile,"%16I64u %10u %6u %2u %16I64u %16I64u %10I64u\n",req->time,req->lsn, req->size, req->operation, start_time, end_time, end_time-req->time);
-				fflush(ssd->outputfile);
+				//fprintf(ssd->outputfile,"%16I64u %10u %6u %2u %16I64u %16I64u %10I64u %s\n",req->time,req->lsn, req->size, req->operation, start_time, end_time, end_time-req->time, req->data);
+				//fflush(ssd->outputfile);
 
 				if(end_time-start_time==0)
 				{
-					printf("the response time is 0?? \n");
-					getchar();
+					//printf("wrong req: %I64u %u %d %u %s\n", req->time, req->lsn, req->size, req->operation, (req->data) ? req->data : "(null)");
+					//printf("the response time is 0?? \n");
+					//getchar();
 				}
 
 				if (req->operation==READ)
@@ -761,112 +869,126 @@ void trace_output(struct ssd_info* ssd){
 *2，打印min_lsn，max_lsn，read_count，program_count等统计信息到文件outputfile中。
 *3，打印相同的信息到文件statisticfile中
 *******************************************************************************/
-void statistic_output(struct ssd_info *ssd)
+void statistic_output(struct ssd_info* ssd)
 {
-	unsigned int lpn_count=0,i,j,k,m,erase=0,plane_erase=0;
-	double gc_energy=0.0;
+	unsigned int lpn_count = 0, i, j, k, m, erase = 0, plane_erase = 0;
+	double gc_energy = 0.0;
 #ifdef DEBUG
-	printf("enter statistic_output,  current time:%I64u\n",ssd->current_time);
+	printf("enter statistic_output,  current time:%I64u\n", ssd->current_time);
 #endif
 
-	for(i=0;i<ssd->parameter->channel_number;i++)
+	if (ssd->outputfile == NULL) {
+		perror("Error opening output file");
+		return;
+	}
+	if (ssd->statisticfile == NULL) {
+		perror("Error opening statistic file");
+		return;
+	}
+
+
+	for (i = 0; i < ssd->parameter->channel_number; i++)
 	{
-		for(j=0;j<ssd->parameter->die_chip;j++)
+		for (j = 0; j < ssd->parameter->die_chip; j++)
 		{
-			for(k=0;k<ssd->parameter->plane_die;k++)
+			for (k = 0; k < ssd->parameter->plane_die; k++)
 			{
-				plane_erase=0;
-				for(m=0;m<ssd->parameter->block_plane;m++)
+				plane_erase = 0;
+				for (m = 0; m < ssd->parameter->block_plane; m++)
 				{
-					if(ssd->channel_head[i].chip_head[0].die_head[j].plane_head[k].blk_head[m].erase_count>0)
+					if (ssd->channel_head[i].chip_head[0].die_head[j].plane_head[k].blk_head[m].erase_count > 0)
 					{
-						erase=erase+ssd->channel_head[i].chip_head[0].die_head[j].plane_head[k].blk_head[m].erase_count;
-						plane_erase+=ssd->channel_head[i].chip_head[0].die_head[j].plane_head[k].blk_head[m].erase_count;
+						erase = erase + ssd->channel_head[i].chip_head[0].die_head[j].plane_head[k].blk_head[m].erase_count;
+						plane_erase += ssd->channel_head[i].chip_head[0].die_head[j].plane_head[k].blk_head[m].erase_count;
 					}
 				}
-				fprintf(ssd->outputfile,"the %d channel, %d chip, %d die, %d plane has : %13d erase operations\n",i,j,k,m,plane_erase);
-				fprintf(ssd->statisticfile,"the %d channel, %d chip, %d die, %d plane has : %13d erase operations\n",i,j,k,m,plane_erase);
+				fprintf(ssd->outputfile, "the %d channel, %d chip, %d die, %d plane has : %13d erase operations\n", i, j, k, m, plane_erase);
+				fprintf(ssd->statisticfile, "the %d channel, %d chip, %d die, %d plane has : %13d erase operations\n", i, j, k, m, plane_erase);
+				fflush(ssd->outputfile);
+				fflush(ssd->statisticfile);
 			}
 		}
 	}
+	//printf("SSD output completed!\n");
 
-	fprintf(ssd->outputfile,"\n");
-	fprintf(ssd->outputfile,"\n");
-	fprintf(ssd->outputfile,"---------------------------statistic data---------------------------\n");	 
-	fprintf(ssd->outputfile,"min lsn: %13d\n",ssd->min_lsn);	
-	fprintf(ssd->outputfile,"max lsn: %13d\n",ssd->max_lsn);
-	fprintf(ssd->outputfile,"read count: %13d\n",ssd->read_count);	  
-	fprintf(ssd->outputfile,"program count: %13d",ssd->program_count);	
-	fprintf(ssd->outputfile,"                        include the flash write count leaded by read requests\n");
-	fprintf(ssd->outputfile,"the read operation leaded by un-covered update count: %13d\n",ssd->update_read_count);
-	fprintf(ssd->outputfile,"erase count: %13d\n",ssd->erase_count);
-	fprintf(ssd->outputfile,"direct erase count: %13d\n",ssd->direct_erase_count);
-	fprintf(ssd->outputfile,"copy back count: %13d\n",ssd->copy_back_count);
-	fprintf(ssd->outputfile,"multi-plane program count: %13d\n",ssd->m_plane_prog_count);
-	fprintf(ssd->outputfile,"multi-plane read count: %13d\n",ssd->m_plane_read_count);
-	fprintf(ssd->outputfile,"interleave write count: %13d\n",ssd->interleave_count);
-	fprintf(ssd->outputfile,"interleave read count: %13d\n",ssd->interleave_read_count);
-	fprintf(ssd->outputfile,"interleave two plane and one program count: %13d\n",ssd->inter_mplane_prog_count);
-	fprintf(ssd->outputfile,"interleave two plane count: %13d\n",ssd->inter_mplane_count);
-	fprintf(ssd->outputfile,"gc copy back count: %13d\n",ssd->gc_copy_back);
-	fprintf(ssd->outputfile,"write flash count: %13d\n",ssd->write_flash_count);
-	fprintf(ssd->outputfile,"interleave erase count: %13d\n",ssd->interleave_erase_count);
-	fprintf(ssd->outputfile,"multiple plane erase count: %13d\n",ssd->mplane_erase_conut);
-	fprintf(ssd->outputfile,"interleave multiple plane erase count: %13d\n",ssd->interleave_mplane_erase_count);
-	fprintf(ssd->outputfile,"read request count: %13d\n",ssd->read_request_count);
-	fprintf(ssd->outputfile,"write request count: %13d\n",ssd->write_request_count);
-	fprintf(ssd->outputfile,"read request average size: %13f\n",ssd->ave_read_size);
-	fprintf(ssd->outputfile,"write request average size: %13f\n",ssd->ave_write_size);
-	fprintf(ssd->outputfile,"read request average response time: %16I64u\n",ssd->read_avg/ssd->read_request_count);
-	fprintf(ssd->outputfile,"write request average response time: %16I64u\n",ssd->write_avg/ssd->write_request_count);
-	fprintf(ssd->outputfile,"buffer read hits: %13d\n",ssd->dram->buffer->read_hit);
-	fprintf(ssd->outputfile,"buffer read miss: %13d\n",ssd->dram->buffer->read_miss_hit);
-	fprintf(ssd->outputfile,"buffer write hits: %13d\n",ssd->dram->buffer->write_hit);
-	fprintf(ssd->outputfile,"buffer write miss: %13d\n",ssd->dram->buffer->write_miss_hit);
-	fprintf(ssd->outputfile,"erase: %13d\n",erase);
+	fprintf(ssd->outputfile, "\n");
+	fprintf(ssd->outputfile, "\n");
+	fprintf(ssd->outputfile, "---------------------------statistic data---------------------------\n");
+	fprintf(ssd->outputfile, "min lsn: %13d\n", ssd->min_lsn);
+	fprintf(ssd->outputfile, "max lsn: %13d\n", ssd->max_lsn);
+	fprintf(ssd->outputfile, "read count: %13d\n", ssd->read_count);
+	fprintf(ssd->outputfile, "program count: %13d", ssd->program_count);
+	fprintf(ssd->outputfile, "   include the flash write count leaded by read requests\n");
+	fprintf(ssd->outputfile, "the read operation leaded by un-covered update count: %13d\n", ssd->update_read_count);
+	fprintf(ssd->outputfile, "erase count: %13d\n", ssd->erase_count);
+	fprintf(ssd->outputfile, "direct erase count: %13d\n", ssd->direct_erase_count);
+	fprintf(ssd->outputfile, "copy back count: %13d\n", ssd->copy_back_count);
+	fprintf(ssd->outputfile, "multi-plane program count: %13d\n", ssd->m_plane_prog_count);
+	fprintf(ssd->outputfile, "multi-plane read count: %13d\n", ssd->m_plane_read_count);
+	fprintf(ssd->outputfile, "interleave write count: %13d\n", ssd->interleave_count);
+	fprintf(ssd->outputfile, "interleave read count: %13d\n", ssd->interleave_read_count);
+	fprintf(ssd->outputfile, "interleave two plane and one program count: %13d\n", ssd->inter_mplane_prog_count);
+	fprintf(ssd->outputfile, "interleave two plane count: %13d\n", ssd->inter_mplane_count);
+	fprintf(ssd->outputfile, "gc copy back count: %13d\n", ssd->gc_copy_back);
+	fprintf(ssd->outputfile, "write flash count: %13d\n", ssd->write_flash_count);
+	fprintf(ssd->outputfile, "interleave erase count: %13d\n", ssd->interleave_erase_count);
+	fprintf(ssd->outputfile, "multiple plane erase count: %13d\n", ssd->mplane_erase_conut);
+	fprintf(ssd->outputfile, "interleave multiple plane erase count: %13d\n", ssd->interleave_mplane_erase_count);
+	fprintf(ssd->outputfile, "read request count: %13d\n", ssd->read_request_count);
+	fprintf(ssd->outputfile, "write request count: %13d\n", ssd->write_request_count);
+	fprintf(ssd->outputfile, "read request average size: %13f\n", ssd->ave_read_size);
+	fprintf(ssd->outputfile, "write request average size: %13f\n", ssd->ave_write_size);
+	fprintf(ssd->outputfile, "read request average response time: %16I64u\n", ssd->read_request_count != 0 ? ssd->read_avg / ssd->read_request_count : -1);
+	fprintf(ssd->outputfile, "write request average response time: %16I64u\n", ssd->write_request_count != 0 ? ssd->write_avg / ssd->write_request_count : -1);
+	fprintf(ssd->outputfile, "buffer read hits: %13d\n", ssd->dram->buffer->read_hit);
+	fprintf(ssd->outputfile, "buffer read miss: %13d\n", ssd->dram->buffer->read_miss_hit);
+	fprintf(ssd->outputfile, "buffer write hits: %13d\n", ssd->dram->buffer->write_hit);
+	fprintf(ssd->outputfile, "buffer write miss: %13d\n", ssd->dram->buffer->write_miss_hit);
+	fprintf(ssd->outputfile, "erase: %13d\n", erase);
 	fflush(ssd->outputfile);
 
 	fclose(ssd->outputfile);
+	//printf("Output file completed!\n");
 
-
-	fprintf(ssd->statisticfile,"\n");
-	fprintf(ssd->statisticfile,"\n");
-	fprintf(ssd->statisticfile,"---------------------------statistic data---------------------------\n");	
-	fprintf(ssd->statisticfile,"min lsn: %13d\n",ssd->min_lsn);	
-	fprintf(ssd->statisticfile,"max lsn: %13d\n",ssd->max_lsn);
-	fprintf(ssd->statisticfile,"read count: %13d\n",ssd->read_count);	  
-	fprintf(ssd->statisticfile,"program count: %13d",ssd->program_count);	  
-	fprintf(ssd->statisticfile,"                        include the flash write count leaded by read requests\n");
-	fprintf(ssd->statisticfile,"the read operation leaded by un-covered update count: %13d\n",ssd->update_read_count);
-	fprintf(ssd->statisticfile,"erase count: %13d\n",ssd->erase_count);	  
-	fprintf(ssd->statisticfile,"direct erase count: %13d\n",ssd->direct_erase_count);
-	fprintf(ssd->statisticfile,"copy back count: %13d\n",ssd->copy_back_count);
-	fprintf(ssd->statisticfile,"multi-plane program count: %13d\n",ssd->m_plane_prog_count);
-	fprintf(ssd->statisticfile,"multi-plane read count: %13d\n",ssd->m_plane_read_count);
-	fprintf(ssd->statisticfile,"interleave count: %13d\n",ssd->interleave_count);
-	fprintf(ssd->statisticfile,"interleave read count: %13d\n",ssd->interleave_read_count);
-	fprintf(ssd->statisticfile,"interleave two plane and one program count: %13d\n",ssd->inter_mplane_prog_count);
-	fprintf(ssd->statisticfile,"interleave two plane count: %13d\n",ssd->inter_mplane_count);
-	fprintf(ssd->statisticfile,"gc copy back count: %13d\n",ssd->gc_copy_back);
-	fprintf(ssd->statisticfile,"write flash count: %13d\n",ssd->write_flash_count);
-	fprintf(ssd->statisticfile,"waste page count: %13d\n",ssd->waste_page_count);
-	fprintf(ssd->statisticfile,"interleave erase count: %13d\n",ssd->interleave_erase_count);
-	fprintf(ssd->statisticfile,"multiple plane erase count: %13d\n",ssd->mplane_erase_conut);
-	fprintf(ssd->statisticfile,"interleave multiple plane erase count: %13d\n",ssd->interleave_mplane_erase_count);
-	fprintf(ssd->statisticfile,"read request count: %13d\n",ssd->read_request_count);
-	fprintf(ssd->statisticfile,"write request count: %13d\n",ssd->write_request_count);
-	fprintf(ssd->statisticfile,"read request average size: %13f\n",ssd->ave_read_size);
-	fprintf(ssd->statisticfile,"write request average size: %13f\n",ssd->ave_write_size);
-	fprintf(ssd->statisticfile,"read request average response time: %16I64u\n",ssd->read_avg/ssd->read_request_count);
-	fprintf(ssd->statisticfile,"write request average response time: %16I64u\n",ssd->write_avg/ssd->write_request_count);
-	fprintf(ssd->statisticfile,"buffer read hits: %13d\n",ssd->dram->buffer->read_hit);
-	fprintf(ssd->statisticfile,"buffer read miss: %13d\n",ssd->dram->buffer->read_miss_hit);
-	fprintf(ssd->statisticfile,"buffer write hits: %13d\n",ssd->dram->buffer->write_hit);
-	fprintf(ssd->statisticfile,"buffer write miss: %13d\n",ssd->dram->buffer->write_miss_hit);
-	fprintf(ssd->statisticfile,"erase: %13d\n",erase);
+	fprintf(ssd->statisticfile, "\n");
+	fprintf(ssd->statisticfile, "\n");
+	fprintf(ssd->statisticfile, "---------------------------statistic data---------------------------\n");
+	fprintf(ssd->statisticfile, "min lsn: %13d\n", ssd->min_lsn);
+	fprintf(ssd->statisticfile, "max lsn: %13d\n", ssd->max_lsn);
+	fprintf(ssd->statisticfile, "read count: %13d\n", ssd->read_count);
+	fprintf(ssd->statisticfile, "program count: %13d", ssd->program_count);
+	fprintf(ssd->statisticfile, "  include the flash write count leaded by read requests\n");
+	fprintf(ssd->statisticfile, "the read operation leaded by un-covered update count: %13d\n", ssd->update_read_count);
+	fprintf(ssd->statisticfile, "erase count: %13d\n", ssd->erase_count);
+	fprintf(ssd->statisticfile, "direct erase count: %13d\n", ssd->direct_erase_count);
+	fprintf(ssd->statisticfile, "copy back count: %13d\n", ssd->copy_back_count);
+	fprintf(ssd->statisticfile, "multi-plane program count: %13d\n", ssd->m_plane_prog_count);
+	fprintf(ssd->statisticfile, "multi-plane read count: %13d\n", ssd->m_plane_read_count);
+	fprintf(ssd->statisticfile, "interleave count: %13d\n", ssd->interleave_count);
+	fprintf(ssd->statisticfile, "interleave read count: %13d\n", ssd->interleave_read_count);
+	fprintf(ssd->statisticfile, "interleave two plane and one program count: %13d\n", ssd->inter_mplane_prog_count);
+	fprintf(ssd->statisticfile, "interleave two plane count: %13d\n", ssd->inter_mplane_count);
+	fprintf(ssd->statisticfile, "gc copy back count: %13d\n", ssd->gc_copy_back);
+	fprintf(ssd->statisticfile, "write flash count: %13d\n", ssd->write_flash_count);
+	fprintf(ssd->statisticfile, "waste page count: %13d\n", ssd->waste_page_count);
+	fprintf(ssd->statisticfile, "interleave erase count: %13d\n", ssd->interleave_erase_count);
+	fprintf(ssd->statisticfile, "multiple plane erase count: %13d\n", ssd->mplane_erase_conut);
+	fprintf(ssd->statisticfile, "interleave multiple plane erase count: %13d\n", ssd->interleave_mplane_erase_count);
+	fprintf(ssd->statisticfile, "read request count: %13d\n", ssd->read_request_count);
+	fprintf(ssd->statisticfile, "write request count: %13d\n", ssd->write_request_count);
+	fprintf(ssd->statisticfile, "read request average size: %13f\n", ssd->ave_read_size);
+	fprintf(ssd->statisticfile, "write request average size: %13f\n", ssd->ave_write_size);
+	fprintf(ssd->statisticfile, "read request average response time: %16I64u\n", ssd->read_request_count != 0 ? ssd->read_avg / ssd->read_request_count : -1);
+	fprintf(ssd->statisticfile, "write request average response time: %16I64u\n", ssd->write_request_count != 0 ? ssd->write_avg / ssd->write_request_count : -1);
+	fprintf(ssd->statisticfile, "buffer read hits: %13d\n", ssd->dram->buffer->read_hit);
+	fprintf(ssd->statisticfile, "buffer read miss: %13d\n", ssd->dram->buffer->read_miss_hit);
+	fprintf(ssd->statisticfile, "buffer write hits: %13d\n", ssd->dram->buffer->write_hit);
+	fprintf(ssd->statisticfile, "buffer write miss: %13d\n", ssd->dram->buffer->write_miss_hit);
+	fprintf(ssd->statisticfile, "erase: %13d\n", erase);
 	fflush(ssd->statisticfile);
 
 	fclose(ssd->statisticfile);
+	//printf("Statistic file completed!\n");
 }
 
 
@@ -965,6 +1087,7 @@ __int64 find_nearest_event(struct ssd_info *ssd)
 	time=(time1>time2)?time2:time1;
 	return time;
 }
+
 
 /***********************************************
 *free_all_node()函数的作用就是释放所有申请的节点
@@ -1097,6 +1220,9 @@ struct ssd_info *no_buffer_distribute(struct ssd_info *ssd)
 	unsigned int sub_size=0;
 	unsigned int sub_state=0;
 
+	//printf("req_tail: %I64u %u %d %d %s\n", ssd->request_tail->time, ssd->request_tail->lsn, ssd->request_tail->size, 
+		//							ssd->request_tail->operation, (ssd->request_tail->data) ? ssd->request_tail->data : "(null)");
+
 	ssd->dram->current_time=ssd->current_time;
 	req=ssd->request_tail;       
 	lsn=req->lsn;
@@ -1131,9 +1257,13 @@ struct ssd_info *no_buffer_distribute(struct ssd_info *ssd)
 				state=state&(~(0xffffffff<<offset2));
 			}
 			sub_size=size(state);
-
+			
 			sub=creat_sub_request(ssd,lpn,sub_size,state,req,req->operation);
 			lpn++;
+
+			
+			//printf("req: %I64u %u %u %d %d %s\n", req->time, req->lsn, lpn, req->size, req->operation, (req->data) ? req->data : "(null)");
+
 		}
 	}
 

@@ -29,7 +29,9 @@ Zhiming Zhu     2012/07/19        2.1.1         Correct erase_planes()   8128398
 
 #define ACTIVE_FIXED 0
 #define ACTIVE_ADJUST 1
+#define DATABASE_SIZE 100000
 
+#define REQUEST_QUEUE_LENGTH 1024
 
 /************************************************************************
 * Compare function for AVL Tree                                        
@@ -79,28 +81,29 @@ struct ssd_info *initiation(struct ssd_info *ssd)
 	FILE *fp=NULL;
 	
 	printf("input parameter file name:");
-	gets(ssd->parameterfilename);
- //	strcpy_s(ssd->parameterfilename,16,"page.parameters");
+//	gets(ssd->parameterfilename);
+ 	strcpy_s(ssd->parameterfilename,16,"page.parameters");
 
 	printf("\ninput trace file name:");
-	gets(ssd->tracefilename);
-//	strcpy_s(ssd->tracefilename,25,"example.ascii");
+//	gets(ssd->tracefilename);
+	strcpy_s(ssd->tracefilename,25,"home-sample-merged.ascii");
 //	strcpy_s(ssd->tracefilename,25,"CFS.ascii");
 //	strcpy_s(ssd->tracefilename,25,"DevDivRelease.ascii");
 
 	printf("\ninput output file name:");
-	gets(ssd->outputfilename);
-//	strcpy_s(ssd->outputfilename,7,"ex.out");
+	//gets(ssd->outputfilename);
+	strcpy_s(ssd->outputfilename,7,"o.txt");
 //	strcpy_s(ssd->outputfilename,25,"CFS.out");
 //	strcpy_s(ssd->outputfilename,25,"DevDivRelease.out");
 
 	printf("\ninput statistic file name:");
-	gets(ssd->statisticfilename);
-//	strcpy_s(ssd->statisticfilename,16,"statistic10.dat");
+	//gets(ssd->statisticfilename);
+	strcpy_s(ssd->statisticfilename,16,"s.txt");
 //	strcpy_s(ssd->statisticfilename,16,"CFS.dat");
 //	strcpy_s(ssd->statisticfilename,25,"DevDivRelease.dat");
 
 	//strcpy_s(ssd->statisticfilename2 ,16,"statistic2.dat");
+
 
 	//导入ssd的配置文件
 	parameters=load_parameters(ssd->parameterfilename);
@@ -118,8 +121,11 @@ struct ssd_info *initiation(struct ssd_info *ssd)
 	ssd->channel_head=(struct channel_info*)malloc(ssd->parameter->channel_number * sizeof(struct channel_info));
 	alloc_assert(ssd->channel_head,"ssd->channel_head");
 	memset(ssd->channel_head,0,ssd->parameter->channel_number * sizeof(struct channel_info));
-	initialize_channels(ssd );
+	initialize_channels(ssd);
 	
+	//初始化页内容数据库
+	ssd->pageDatabase = create_hash_table(DATABASE_SIZE);
+
 
 	printf("\n");
 	if((err=fopen_s(&ssd->outputfile,ssd->outputfilename,"w")) != 0)
@@ -134,6 +140,7 @@ struct ssd_info *initiation(struct ssd_info *ssd)
 		printf("the statistic file can't open\n");
 		return NULL;
 	}
+
 
 	printf("\n");
 // 	if((err=fopen_s(&ssd->statisticfile2,ssd->statisticfilename2,"w"))!=0)
@@ -169,11 +176,11 @@ struct ssd_info *initiation(struct ssd_info *ssd)
 	}
 
 	fprintf(ssd->outputfile,"\n");
-	fprintf(ssd->outputfile,"-----------------------simulation output----------------------\n");
+	fprintf(ssd->outputfile,"-----------------------simulation output1----------------------\n");
 	fflush(ssd->outputfile);
 
 	fprintf(ssd->statisticfile,"\n");
-	fprintf(ssd->statisticfile,"-----------------------simulation output----------------------\n");
+	fprintf(ssd->statisticfile,"-----------------------simulation output1----------------------\n");
 	fflush(ssd->statisticfile);
 
 	fclose(fp);
@@ -358,7 +365,7 @@ struct parameter_value *load_parameters(char parameter_file[30])
 	p = (struct parameter_value *)malloc(sizeof(struct parameter_value));
 	alloc_assert(p,"parameter_value");
 	memset(p,0,sizeof(struct parameter_value));
-	p->queue_length=5;
+	p->queue_length=REQUEST_QUEUE_LENGTH;
 	memset(buf,0,BUFSIZE);
 		
 	if((ferr = fopen_s(&fp,parameter_file,"r"))!= 0)
@@ -569,6 +576,195 @@ struct parameter_value *load_parameters(char parameter_file[30])
 	fclose(fp2);
 
 	return p;
+}
+
+
+/*******************************
+*实现request结构体的运算符=重载
+********************************/
+void request_assign(struct request* dest, const struct request* src) {
+	if (!dest || !src) {
+		return;
+	}
+
+	dest->time = src->time;
+	dest->lsn = src->lsn;
+	dest->size = src->size;
+	dest->operation = src->operation;
+	dest->complete_lsn_count = src->complete_lsn_count;
+	dest->distri_flag = src->distri_flag;
+	dest->begin_time = src->begin_time;
+	dest->response_time = src->response_time;
+	dest->energy_consumption = src->energy_consumption;
+
+	// 释放旧的 data 避免内存泄漏
+	if (dest->data) {
+		free(dest->data);
+		dest->data = NULL;
+	}
+
+	// 深拷贝 data
+	if (src->data) {
+		dest->data = (char*)malloc(strlen(src->data) + 1);
+		if (dest->data) {
+			strcpy(dest->data, src->data);
+		}
+	}
+
+	// 浅拷贝指针
+	dest->need_distr_flag = src->need_distr_flag;
+	dest->subs = src->subs;
+	dest->next_node = NULL;  // 这里不直接赋值 src->next_node，避免链表断裂
+}
+
+
+/**************
+*哈希表基础操作
+***************/
+// 哈希函数（使用乘法散列法）
+unsigned int hash_function(unsigned int ppn, int capacity) {
+	const unsigned int A = 2654435761u;  // 斐波那契乘法散列数
+	return (ppn * A) % capacity;
+}
+
+// 创建哈希表
+HashTable* create_hash_table(int capacity) {
+	HashTable* ht = (HashTable*)malloc(sizeof(HashTable));
+	ht->capacity = capacity;
+	ht->size = 0;
+	ht->buckets = (pageData**)calloc(capacity, sizeof(pageData*));
+	return ht;
+}
+
+// 插入或更新键值对
+void insert(HashTable* ht, unsigned int ppn, const char* data) {
+	unsigned int index = hash_function(ppn, ht->capacity);
+	pageData* node = ht->buckets[index];
+
+	// 查找是否已存在 ppn
+	while (node) {
+		if (node->ppn == ppn) {
+			free(node->data); // 释放旧值
+			node->data = (char*)malloc(strlen(data) + 1);
+			if (node->data) {
+				strncpy(node->data, data, strlen(data));
+			}
+			node->data[strlen(data)] = '\0';
+			return;
+		}
+		node = node->next;
+	}
+
+	// 创建新节点
+	pageData* new_node = (pageData*)malloc(sizeof(pageData));
+	new_node->ppn = ppn;
+	new_node->data = (char*)malloc(strlen(data) + 1);
+	if (new_node->data) {
+		strncpy(new_node->data, data, strlen(data));
+	}
+	new_node->next = ht->buckets[index]; // 头插法
+	ht->buckets[index] = new_node;
+	ht->size++;
+
+	// 负载因子超标，扩展哈希表
+	if ((float)ht->size / ht->capacity > LOAD_FACTOR) {
+		rehash(ht);
+	}
+}
+
+// 查找键对应的值
+char* find(HashTable* ht, unsigned int ppn) {
+	unsigned int index = hash_function(ppn, ht->capacity);
+	pageData* node = ht->buckets[index];
+
+	while (node) {
+		if (node->ppn == ppn) {
+			return node->data;
+		}
+		node = node->next;
+	}
+	return NULL; // 未找到
+}
+
+// 删除键
+void erase(HashTable* ht, unsigned int ppn) {
+	unsigned int index = hash_function(ppn, ht->capacity);
+	pageData* node = ht->buckets[index];
+	pageData* prev = NULL;
+
+	while (node) {
+		if (node->ppn == ppn) {
+			if (prev) {
+				prev->next = node->next;
+			}
+			else {
+				ht->buckets[index] = node->next;
+			}
+			free(node->data);
+			free(node);
+			ht->size--;
+			return;
+		}
+		prev = node;
+		node = node->next;
+	}
+}
+
+// 重新扩展哈希表
+void rehash(HashTable* ht) {
+	int new_capacity = ht->capacity * 2;
+	pageData** new_buckets = (pageData**)calloc(new_capacity, sizeof(pageData*));
+
+	// 重新分配所有元素
+	for (int i = 0; i < ht->capacity; i++) {
+		pageData* node = ht->buckets[i];
+		while (node) {
+			pageData* next = node->next; // 保存下一个节点
+			unsigned int new_index = hash_function(node->ppn, new_capacity);
+
+			// 头插法
+			node->next = new_buckets[new_index];
+			new_buckets[new_index] = node;
+
+			node = next;
+		}
+	}
+
+	free(ht->buckets);
+	ht->buckets = new_buckets;
+	ht->capacity = new_capacity;
+}
+
+// 打印哈希表
+void print_hash_table(HashTable* ht) {
+	for (int i = 0; i < ht->capacity; i++) {
+		printf("Bucket %d:", i);
+		pageData* node = ht->buckets[i];
+		while (node) {
+			printf(" [%u => %s]", node->ppn, node->data);
+			node = node->next;
+		}
+		printf("\n");
+	}
+}
+
+// 释放哈希表
+void free_hash_table(HashTable* ht) {
+	for (int i = 0; i < ht->capacity; i++) {
+		pageData* node = ht->buckets[i];
+		while (node) {
+			pageData* temp = node;
+			node = node->next;
+			free(temp->data);
+			temp->data = NULL;
+			free(temp);
+			temp = NULL;
+		}
+	}
+	free(ht->buckets);
+	ht->buckets = NULL;
+	free(ht);
+	ht = NULL;
 }
 
 

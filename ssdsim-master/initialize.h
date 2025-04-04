@@ -24,6 +24,7 @@ Zhiming Zhu     2012/07/19        2.1.1         Correct erase_planes()   8128398
 #include <ctype.h>
 #include "avlTree.h"
 
+
 #define SECTOR 512
 #define BUFSIZE 200
 
@@ -110,6 +111,14 @@ Zhiming Zhu     2012/07/19        2.1.1         Correct erase_planes()   8128398
 #define INFEASIBLE	-2
 #define OVERFLOW	-3
 typedef int Status;     
+
+/***************
+*哈希表大小设置
+****************/
+#define INITIAL_CAPACITY 8   // 初始桶大小
+#define LOAD_FACTOR 0.75     // 负载因子，超过时扩展哈希表
+
+
 
 struct ac_time_characteristics{
 	int tPROG;     //program time
@@ -209,6 +218,7 @@ struct ssd_info{
 	struct sub_request *subs_w_tail;
 	struct event_node *event;            //事件队列，每产生一个新的事件，按照时间顺序加到这个队列，在simulate函数最后，根据这个队列队首的时间，确定时间
 	struct channel_info *channel_head;   //指向channel结构体数组的首地址
+	struct hashTable* pageDatabase;      //存储页数据内容
 };
 
 
@@ -351,7 +361,7 @@ struct request{
 	unsigned int lsn;                  //请求的起始地址，逻辑地址
 	unsigned int size;                 //请求的大小，既多少个扇区
 	unsigned int operation;            //请求的种类，1为读，0为写
-	char data[256];					   //请求数据：1页共256位
+	char* data;					   //请求数据：1页共256位
 
 	unsigned int* need_distr_flag;
 	unsigned int complete_lsn_count;   //record the count of lsn served by buffer
@@ -372,6 +382,7 @@ struct sub_request{
 	unsigned int ppn;                  //分配那个物理子页给这个子请求。在multi_chip_page_mapping中，产生子页请求时可能就知道psn的值，其他时候psn的值由page_map_read,page_map_write等FTL最底层函数产生。 
 	unsigned int operation;            //表示该子请求的类型，除了读1 写0，还有擦除，two plane等操作 
 	int size;
+	char* data;
 
 	unsigned int current_state;        //表示该子请求所处的状态，见宏定义sub request
 	__int64 current_time;
@@ -523,6 +534,26 @@ typedef struct Dram_write_map
 }Dram_write_map;
 
 
+/********************************
+* 哈希表设置，格式为 {ppn + data}
+*********************************/
+// 哈希表节点结构
+typedef struct pageData {
+	unsigned int ppn;
+	char* data;
+	struct pageData* next;  // 链地址法
+} pageData;
+
+// 哈希表结构
+typedef struct HashTable {
+	pageData** buckets;  // 指向桶数组
+	int capacity;        // 桶的数量
+	int size;            // 当前存储的键值对数量
+} HashTable;
+
+
+
+
 struct ssd_info *initiation(struct ssd_info *);
 struct parameter_value *load_parameters(char parameter_file[30]);
 struct page_info * initialize_page(struct page_info * p_page);
@@ -532,3 +563,14 @@ struct die_info * initialize_die(struct die_info * p_die,struct parameter_value 
 struct chip_info * initialize_chip(struct chip_info * p_chip,struct parameter_value *parameter,long long current_time );
 struct ssd_info * initialize_channels(struct ssd_info * ssd );
 struct dram_info * initialize_dram(struct ssd_info * ssd);
+void request_assign(struct request* dest, const struct request* src);
+
+
+unsigned int hash_function(unsigned int ppn, int capacity);
+HashTable* create_hash_table(int capacity);
+void insert(HashTable* ht, unsigned int ppn, const char* data);
+char* find(HashTable* ht, unsigned int ppn);
+void erase(HashTable* ht, unsigned int ppn);
+void rehash(HashTable* ht);
+void print_hash_table(HashTable* ht);
+void free_hash_table(HashTable* ht);

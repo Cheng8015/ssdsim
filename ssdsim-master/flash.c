@@ -27,6 +27,7 @@ Zhiming Zhu     2012/07/19        2.1.1         Correct erase_planes()   8128398
 #include "pagemap.h"
 #include "initialize.h"
 
+
 /**********************
 *这个函数只作用于写请求
 ***********************/
@@ -297,6 +298,7 @@ struct ssd_info * insert2buffer(struct ssd_info *ssd,unsigned int lpn,int state,
 	
 	
 	unsigned int sub_req_state=0, sub_req_size=0,sub_req_lpn=0;
+	char* sub_req_data=NULL;
 
 	#ifdef DEBUG
 	printf("enter insert2buffer,  current time:%I64u, lpn:%d, state:%d,\n",ssd->current_time,lpn,state);
@@ -307,7 +309,7 @@ struct ssd_info * insert2buffer(struct ssd_info *ssd,unsigned int lpn,int state,
 	buffer_node= (struct buffer_group*)avlTreeFind(ssd->dram->buffer, (TREE_NODE *)&key);    /*在平衡二叉树中寻找buffer node*/ 
     
 	/************************************************************************************************
-	*没有命中。
+	*在buff中没有命中：
 	*第一步根据这个lpn有多少子页需要写到buffer，去除已写回的lsn，为该lpn腾出位置，
 	*首先即要计算出free sector（表示还有多少可以直接写的buffer节点）。
 	*如果free_sector>=sector_count，即有多余的空间够lpn子请求写，不需要产生写回请求
@@ -330,7 +332,7 @@ struct ssd_info * insert2buffer(struct ssd_info *ssd,unsigned int lpn,int state,
 				sub_req_state=ssd->dram->buffer->buffer_tail->stored; 
 				sub_req_size=size(ssd->dram->buffer->buffer_tail->stored);
 				sub_req_lpn=ssd->dram->buffer->buffer_tail->group;
-				sub_req=creat_sub_request(ssd,sub_req_lpn,sub_req_size,sub_req_state,req,WRITE);
+				sub_req=creat_sub_request(ssd,sub_req_lpn,sub_req_size,sub_req_state,sub_req_data, req,WRITE);
 				
 				/**********************************************************************************
 				*req不为空，表示这个insert2buffer函数是在buffer_management中调用，传递了request进来
@@ -394,9 +396,9 @@ struct ssd_info * insert2buffer(struct ssd_info *ssd,unsigned int lpn,int state,
 		ssd->dram->buffer->buffer_sector_count += sector_count;
 	}
 	/****************************************************************************************
-	*在buffer中命中的情况
-	*算然命中了，但是命中的只是lpn，有可能新来的写请求，只是需要写lpn这一page的某几个sub_page
-	*这时有需要进一步的判断
+	*在buffer中命中：
+	*虽然命中了，但是命中的只是lpn，有可能新来的写请求，只是需要写lpn这一page的某几个sub_page
+	*这时需要有进一步的判断
 	*****************************************************************************************/
 	else
 	{
@@ -471,8 +473,8 @@ struct ssd_info * insert2buffer(struct ssd_info *ssd,unsigned int lpn,int state,
 						sub_req=NULL;
 						sub_req_state=ssd->dram->buffer->buffer_tail->stored; 
 						sub_req_size=size(ssd->dram->buffer->buffer_tail->stored);
-						sub_req_lpn=ssd->dram->buffer->buffer_tail->group;
-						sub_req=creat_sub_request(ssd,sub_req_lpn,sub_req_size,sub_req_state,req,WRITE);
+						sub_req_lpn = ssd->dram->buffer->buffer_tail->group;
+						sub_req=creat_sub_request(ssd,sub_req_lpn,sub_req_size,sub_req_state,sub_req_data,req,WRITE);
 
 						if(req!=NULL)           
 						{
@@ -538,8 +540,9 @@ struct ssd_info * insert2buffer(struct ssd_info *ssd,unsigned int lpn,int state,
 	return ssd;
 }
 
+
 /**************************************************************************************
-*函数的功能是寻找活跃快，应为每个plane中都只有一个活跃块，只有这个活跃块中才能进行操作
+*函数的功能是寻找活跃块，应为每个plane中都只有一个活跃块，只有这个活跃块中才能进行操作
 ***************************************************************************************/
 Status  find_active_block(struct ssd_info *ssd,unsigned int channel,unsigned int chip,unsigned int die,unsigned int plane)
 {
@@ -567,6 +570,7 @@ Status  find_active_block(struct ssd_info *ssd,unsigned int channel,unsigned int
 	}
 }
 
+
 /*************************************************
 *这个函数的功能就是一个模拟一个实实在在的写操作
 *就是更改这个page的相关参数，以及整个ssd的统计参数
@@ -591,15 +595,17 @@ Status write_page(struct ssd_info *ssd,unsigned int channel,unsigned int chip,un
 	return SUCCESS;
 }
 
+
 /**********************************************
 *这个函数的功能是根据lpn，size，state创建子请求
 **********************************************/
 struct sub_request * creat_sub_request(struct ssd_info * ssd,unsigned int lpn,int size,unsigned int state,struct request * req,unsigned int operation)
 {
-	struct sub_request* sub=NULL,* sub_r=NULL;
+	struct sub_request* sub=NULL,* sub_r=NULL, * p=NULL;
 	struct channel_info * p_ch=NULL;
 	struct local * loc=NULL;
 	unsigned int flag=0;
+	unsigned int pos = 0;
 
 	sub = (struct sub_request*)malloc(sizeof(struct sub_request));                        /*申请一个子请求的结构*/
 	alloc_assert(sub,"sub_request");
@@ -607,6 +613,7 @@ struct sub_request * creat_sub_request(struct ssd_info * ssd,unsigned int lpn,in
 
 	if(sub==NULL)
 	{
+		printf("sub == NULL!\n");
 		return NULL;
 	}
 	sub->location=NULL;
@@ -619,7 +626,17 @@ struct sub_request * creat_sub_request(struct ssd_info * ssd,unsigned int lpn,in
 		sub->next_subs = req->subs;
 		req->subs = sub;
 	}
-	
+	else {
+		printf("req == NULL!\n");
+	}
+
+	// 找到该子请求相对于原请求的数据偏移量
+	p = req->subs;
+	while (p != NULL) {
+		pos += p->size;
+		p = p->next_subs;
+	}
+
 	/*************************************************************************************
 	*在读操作的情况下，有一点非常重要就是要预先判断读子请求队列中是否有与这个子请求相同的，
 	*有的话，新子请求就不必再执行了，将新的子请求直接赋为完成
@@ -690,21 +707,42 @@ struct sub_request * creat_sub_request(struct ssd_info * ssd,unsigned int lpn,in
 		sub->size=size;
 		sub->state=state;
 		sub->begin_time=ssd->current_time;
-      
+
+		int sub_data_len = sub->size * 32;
+		sub->data = malloc(sub_data_len + 1);
+		strncpy(sub->data, req->data + pos * 32, sub_data_len);
+		sub->data[sub_data_len] = '\0';
+
 		if (allocate_location(ssd ,sub)==ERROR)
 		{
 			free(sub->location);
 			sub->location=NULL;
+			free(sub->data);
+			sub->data = NULL;
 			free(sub);
 			sub=NULL;
+			printf("Allocate_location(ssd, sub) failed!\n");
 			return NULL;
 		}
-			
+
+		/***********************************************************************************
+		*为子请求分配空间之后，将子请求中的数据块写入哈希表中。哈希表对应格式为{ppn + data}。
+		************************************************************************************/
+		ssd = get_ppn(ssd, sub->location->channel, sub->location->chip, sub->location->die, sub->location->plane, sub);
+		insert(ssd->pageDatabase, sub->ppn, sub->data);
+
+		//printf("sub_req: %I64u %u %d %u %s\n", sub->current_time, sub->lpn, sub->size, sub->operation, (sub->data) ? sub->data : "(null)");
+
 	}
+	/******************
+	*出现其他操作类型则报错，释放空间
+	*******************/
 	else
 	{
 		free(sub->location);
 		sub->location=NULL;
+		free(sub->data);
+		sub->data = NULL;
 		free(sub);
 		sub=NULL;
 		printf("\nERROR ! Unexpected command.\n");
@@ -713,6 +751,7 @@ struct sub_request * creat_sub_request(struct ssd_info * ssd,unsigned int lpn,in
 	
 	return sub;
 }
+
 
 /******************************************************
 *函数的功能是在给出的channel，chip，die上面寻找读子请求
@@ -772,10 +811,12 @@ struct sub_request * find_read_sub_request(struct ssd_info * ssd, unsigned int c
 	return NULL;
 }
 
+
 /*******************************************************************************
 *函数的功能是寻找写子请求。
-*分两种情况1，要是是完全动态分配就在ssd->subs_w_head队列上找
-*2，要是不是完全动态分配那么就在ssd->channel_head[channel].subs_w_head队列上查找
+*分两种情况: 
+*1. 要是是完全动态分配就在ssd->subs_w_head队列上找
+*2. 要是不是完全动态分配那么就在ssd->channel_head[channel].subs_w_head队列上查找
 ********************************************************************************/
 struct sub_request * find_write_sub_request(struct ssd_info * ssd, unsigned int channel)
 {
@@ -880,6 +921,7 @@ struct sub_request * find_write_sub_request(struct ssd_info * ssd, unsigned int 
 	return sub;
 }
 
+
 /*********************************************************************************************
 *专门为读子请求服务的函数
 *1，只有当读子请求的当前状态是SR_R_C_A_TRANSFER
@@ -929,6 +971,7 @@ Status services_2_r_cmd_trans_and_complete(struct ssd_info * ssd)
 	
 	return SUCCESS;
 }
+
 
 /**************************************************************************
 *这个函数也是只处理读子请求，处理chip当前状态是CHIP_WAIT，
@@ -1173,6 +1216,7 @@ int services_2_r_wait(struct ssd_info * ssd,unsigned int channel,unsigned int * 
 	return SUCCESS;
 }
 
+
 /*********************************************************************
 *当一个写子请求处理完后，要从请求队列上删除，这个函数就是执行这个功能。
 **********************************************************************/
@@ -1213,9 +1257,10 @@ int delete_w_sub_request(struct ssd_info * ssd, unsigned int channel, struct sub
 	return SUCCESS;	
 }
 
-/*
+
+/*************************************
 *函数的功能就是执行copyback命令的功能，
-*/
+**************************************/
 Status copy_back(struct ssd_info * ssd, unsigned int channel, unsigned int chip, unsigned int die,struct sub_request * sub)
 {
 	int old_ppn=-1, new_ppn=-1;
@@ -1312,6 +1357,7 @@ Status copy_back(struct ssd_info * ssd, unsigned int channel, unsigned int chip,
 	return SUCCESS;
 }
 
+
 /*****************
 *静态写操作的实现
 ******************/
@@ -1355,6 +1401,7 @@ Status static_write(struct ssd_info * ssd, unsigned int channel,unsigned int chi
 	
 	return SUCCESS;
 }
+
 
 /********************
 写子请求的处理函数
@@ -1537,7 +1584,6 @@ Status services_2_write(struct ssd_info * ssd,unsigned int channel,unsigned int 
 /********************************************************
 *这个函数的主要功能是主控读子请求和写子请求的状态变化处理
 *********************************************************/
-
 struct ssd_info *process(struct ssd_info *ssd)   
 {
 
@@ -1619,12 +1665,12 @@ struct ssd_info *process(struct ssd_info *ssd)
 			sub=ssd->channel_head[i].subs_r_head;                                        /*先处理读请求*/
 			services_2_r_wait(ssd,i,&flag,&chg_cur_time_flag);                           /*处理处于等待状态的读子请求*/
 		
-			if((flag==0)&&(ssd->channel_head[i].subs_r_head!=NULL))                      /*if there are no new read request and data is ready in some dies, send these data to controller and response this request*/		
+			if((flag==0)&&(ssd->channel_head[i].subs_r_head!=NULL))                      /*如果没有新的读请求，并且在某些时间内数据已经准备好，则将这些数据发送给控制器并响应该请求*/		
 			{		     
 				services_2_r_data_trans(ssd,i,&flag,&chg_cur_time_flag);                    
 						
 			}
-			if(flag==0)                                                                  /*if there are no read request to take channel, we can serve write requests*/ 		
+			if(flag==0)                                                                  /*如果没有读请求在channel上，就可以处理写请求*/ 		
 			{	
 				services_2_write(ssd,i,&flag,&chg_cur_time_flag);
 				
@@ -1634,6 +1680,7 @@ struct ssd_info *process(struct ssd_info *ssd)
 
 	return ssd;
 }
+
 
 /****************************************************************************************************************************
 *当ssd支持高级命令时，这个函数的作用就是处理高级命令的写子请求
@@ -2018,6 +2065,7 @@ struct ssd_info *dynamic_advanced_process(struct ssd_info *ssd,unsigned int chan
 	return ssd;
 }
 
+
 /****************************************
 *执行写子请求时，为普通的写子请求获取ppn
 *****************************************/
@@ -2051,7 +2099,6 @@ Status get_ppn_for_normal_command(struct ssd_info * ssd, unsigned int channel,un
 	}
 
 }
-
 
 
 /************************************************************************************************
@@ -2491,6 +2538,7 @@ Status make_level_page(struct ssd_info * ssd, struct sub_request * sub0,struct s
 	
 }
 
+
 /******************************************************************************************************
 *函数的功能是为two plane命令寻找出两个相同水平位置的页，并且修改统计值，修改页的状态
 *注意这个函数与上一个函数make_level_page函数的区别，make_level_page这个函数是让sub1与sub0的page位置相同
@@ -2782,9 +2830,10 @@ Status find_level_page(struct ssd_info *ssd,unsigned int channel,unsigned int ch
 	return SUCCESS;     
 }
 
-/*
+
+/************************************************************
 *函数的功能是修改找到的page页的状态以及相应的dram中映射表的值
-*/
+*************************************************************/
 struct ssd_info *flash_page_state_modify(struct ssd_info *ssd,struct sub_request *sub,unsigned int channel,unsigned int chip,unsigned int die,unsigned int plane,unsigned int block,unsigned int page)
 {
 	unsigned int ppn,full_page;
