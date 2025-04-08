@@ -29,9 +29,7 @@ Zhiming Zhu     2012/07/19        2.1.1         Correct erase_planes()   8128398
 
 #define ACTIVE_FIXED 0
 #define ACTIVE_ADJUST 1
-#define DATABASE_SIZE 100000
 
-#define REQUEST_QUEUE_LENGTH 1024
 
 /************************************************************************
 * Compare function for AVL Tree                                        
@@ -72,7 +70,7 @@ extern int freeFunc(TREE_NODE *pNode)
 *1.this function allocate memory for ssd structure 
 *2.set the infomation according to the parameter file
 *******************************************/
-struct ssd_info *initiation(struct ssd_info *ssd)
+struct ssd_info * initiation(struct ssd_info *ssd)
 {
 	unsigned int x=0,y=0,i=0,j=0,k=0,l=0,m=0,n=0;
 	errno_t err;
@@ -110,6 +108,7 @@ struct ssd_info *initiation(struct ssd_info *ssd)
 	ssd->parameter=parameters;
 	ssd->min_lsn=0x7fffffff;
 	ssd->page=ssd->parameter->chip_num*ssd->parameter->die_chip*ssd->parameter->plane_die*ssd->parameter->block_plane*ssd->parameter->page_block;
+	ssd->dedup_threshold = 8;
 
 	//初始化 dram
 	ssd->dram = (struct dram_info *)malloc(sizeof(struct dram_info));
@@ -123,9 +122,15 @@ struct ssd_info *initiation(struct ssd_info *ssd)
 	memset(ssd->channel_head,0,ssd->parameter->channel_number * sizeof(struct channel_info));
 	initialize_channels(ssd);
 	
-	//初始化页内容数据库
-	ssd->pageDatabase = create_hash_table(DATABASE_SIZE);
+	//初始化动态阈值调整器
+	ssd->threshold_adjuster = (struct ThresholdAdjuster*)malloc(sizeof(struct ThresholdAdjuster));
+	alloc_assert(ssd->threshold_adjuster, "ssd->threshold_adjuster");
+	memset(ssd->threshold_adjuster, 0, sizeof(struct ThresholdAdjuster));
+	initialize_adjuster(ssd);
 
+	//初始化重删部分数据
+	ssd->duplicate_chunks = 0;
+	ssd->unique_chunks = 0;
 
 	printf("\n");
 	if((err=fopen_s(&ssd->outputfile,ssd->outputfilename,"w")) != 0)
@@ -214,10 +219,24 @@ struct dram_info * initialize_dram(struct ssd_info * ssd)
 
 struct page_info * initialize_page(struct page_info * p_page )
 {
-	p_page->valid_state =0;
+	p_page->valid_state = 0;
 	p_page->free_state = PG_SUB;
 	p_page->lpn = -1;
-	p_page->written_count=0;
+	p_page->written_count  = 0;
+
+	p_page->ref_count = 0;
+	p_page->dedup_tag = 0;
+
+	p_page->data = (char*)malloc(PAGE_DATA_SIZE);
+	if (p_page->data != NULL) {
+		memset(p_page->data, 0, PAGE_DATA_SIZE);
+	}
+
+	p_page->hash_value = (char*)malloc(HASH_SIZE);
+	if (p_page->hash_value != NULL) {
+		memset(p_page->hash_value, 0, HASH_SIZE);
+	}
+
 	return p_page;
 }
 
@@ -616,155 +635,3 @@ void request_assign(struct request* dest, const struct request* src) {
 	dest->subs = src->subs;
 	dest->next_node = NULL;  // 这里不直接赋值 src->next_node，避免链表断裂
 }
-
-
-/**************
-*哈希表基础操作
-***************/
-// 哈希函数（使用乘法散列法）
-unsigned int hash_function(unsigned int ppn, int capacity) {
-	const unsigned int A = 2654435761u;  // 斐波那契乘法散列数
-	return (ppn * A) % capacity;
-}
-
-// 创建哈希表
-HashTable* create_hash_table(int capacity) {
-	HashTable* ht = (HashTable*)malloc(sizeof(HashTable));
-	ht->capacity = capacity;
-	ht->size = 0;
-	ht->buckets = (pageData**)calloc(capacity, sizeof(pageData*));
-	return ht;
-}
-
-// 插入或更新键值对
-void insert(HashTable* ht, unsigned int ppn, const char* data) {
-	unsigned int index = hash_function(ppn, ht->capacity);
-	pageData* node = ht->buckets[index];
-
-	// 查找是否已存在 ppn
-	while (node) {
-		if (node->ppn == ppn) {
-			free(node->data); // 释放旧值
-			node->data = (char*)malloc(strlen(data) + 1);
-			if (node->data) {
-				strncpy(node->data, data, strlen(data));
-			}
-			node->data[strlen(data)] = '\0';
-			return;
-		}
-		node = node->next;
-	}
-
-	// 创建新节点
-	pageData* new_node = (pageData*)malloc(sizeof(pageData));
-	new_node->ppn = ppn;
-	new_node->data = (char*)malloc(strlen(data) + 1);
-	if (new_node->data) {
-		strncpy(new_node->data, data, strlen(data));
-	}
-	new_node->next = ht->buckets[index]; // 头插法
-	ht->buckets[index] = new_node;
-	ht->size++;
-
-	// 负载因子超标，扩展哈希表
-	if ((float)ht->size / ht->capacity > LOAD_FACTOR) {
-		rehash(ht);
-	}
-}
-
-// 查找键对应的值
-char* find(HashTable* ht, unsigned int ppn) {
-	unsigned int index = hash_function(ppn, ht->capacity);
-	pageData* node = ht->buckets[index];
-
-	while (node) {
-		if (node->ppn == ppn) {
-			return node->data;
-		}
-		node = node->next;
-	}
-	return NULL; // 未找到
-}
-
-// 删除键
-void erase(HashTable* ht, unsigned int ppn) {
-	unsigned int index = hash_function(ppn, ht->capacity);
-	pageData* node = ht->buckets[index];
-	pageData* prev = NULL;
-
-	while (node) {
-		if (node->ppn == ppn) {
-			if (prev) {
-				prev->next = node->next;
-			}
-			else {
-				ht->buckets[index] = node->next;
-			}
-			free(node->data);
-			free(node);
-			ht->size--;
-			return;
-		}
-		prev = node;
-		node = node->next;
-	}
-}
-
-// 重新扩展哈希表
-void rehash(HashTable* ht) {
-	int new_capacity = ht->capacity * 2;
-	pageData** new_buckets = (pageData**)calloc(new_capacity, sizeof(pageData*));
-
-	// 重新分配所有元素
-	for (int i = 0; i < ht->capacity; i++) {
-		pageData* node = ht->buckets[i];
-		while (node) {
-			pageData* next = node->next; // 保存下一个节点
-			unsigned int new_index = hash_function(node->ppn, new_capacity);
-
-			// 头插法
-			node->next = new_buckets[new_index];
-			new_buckets[new_index] = node;
-
-			node = next;
-		}
-	}
-
-	free(ht->buckets);
-	ht->buckets = new_buckets;
-	ht->capacity = new_capacity;
-}
-
-// 打印哈希表
-void print_hash_table(HashTable* ht) {
-	for (int i = 0; i < ht->capacity; i++) {
-		printf("Bucket %d:", i);
-		pageData* node = ht->buckets[i];
-		while (node) {
-			printf(" [%u => %s]", node->ppn, node->data);
-			node = node->next;
-		}
-		printf("\n");
-	}
-}
-
-// 释放哈希表
-void free_hash_table(HashTable* ht) {
-	for (int i = 0; i < ht->capacity; i++) {
-		pageData* node = ht->buckets[i];
-		while (node) {
-			pageData* temp = node;
-			node = node->next;
-			free(temp->data);
-			temp->data = NULL;
-			free(temp);
-			temp = NULL;
-		}
-	}
-	free(ht->buckets);
-	ht->buckets = NULL;
-	free(ht);
-	ht = NULL;
-}
-
-

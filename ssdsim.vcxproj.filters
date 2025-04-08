@@ -30,6 +30,12 @@
     <ClCompile Include="ssdsim-master\ssd.c">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="ssdsim-master\hash.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="ssdsim-master\dynamicThreshold.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ssdsim-master\avlTree.h">
@@ -45,6 +51,12 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="ssdsim-master\ssd.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ssdsim-master\hash.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ssdsim-master\dynamicThreshold.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>

@@ -1,3 +1,4 @@
+#pragma once
 /*****************************************************************************************************************************
 This project was supported by the National Basic Research 973 Program of China under Grant No.2011CB302301
 Huazhong University of Science and Technology (HUST)   Wuhan National Laboratory for Optoelectronics
@@ -16,14 +17,18 @@ Chao Ren        2011/07/01        2.0           Change               529517386@q
 Hao Luo         2011/01/01        2.0           Change               luohao135680@gmail.com
 Zhiming Zhu     2012/07/19        2.1.1         Correct erase_planes()   812839842@qq.com  
 *****************************************************************************************************************************/
+#ifndef INITIALIZE_H
+#define INITIALIZE_H
+
 
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
 #include <ctype.h>
-#include "avlTree.h"
 
+#include "avlTree.h"
+#include "dynamicThreshold.h"
 
 #define SECTOR 512
 #define BUFSIZE 200
@@ -112,12 +117,12 @@ Zhiming Zhu     2012/07/19        2.1.1         Correct erase_planes()   8128398
 #define OVERFLOW	-3
 typedef int Status;     
 
-/***************
-*哈希表大小设置
-****************/
-#define INITIAL_CAPACITY 8   // 初始桶大小
-#define LOAD_FACTOR 0.75     // 负载因子，超过时扩展哈希表
-
+/**************
+* 重删相关状态
+***************/
+#define REQUEST_QUEUE_LENGTH 1024
+#define PAGE_DATA_SIZE 256
+#define HASH_SIZE 256
 
 
 struct ac_time_characteristics{
@@ -155,7 +160,8 @@ struct ac_time_characteristics{
 	int tRHW;      //RE high to WE low
 	int tWHR;      //WE high to RE low
 	int tRST;      //device resetting time
-}ac_timing;
+};
+extern struct ac_time_characteristics ac_timing;
 
 
 struct ssd_info{ 
@@ -164,8 +170,9 @@ struct ssd_info{
 	__int64 next_request_time;
 	unsigned int real_time_subreq;       //记录实时的写请求个数，用在全动态分配时，channel优先的情况
 	int flag;
-	int active_flag;                     //记录主动写是否阻塞，如果发现柱塞，需要将时间向前推进,0表示没有阻塞，1表示被阻塞，需要向前推进时间
+	int active_flag;                     //记录主动写是否阻塞，如果发现阻塞，需要将时间向前推进,0表示没有阻塞，1表示被阻塞，需要向前推进时间
 	unsigned int page;
+	unsigned int dedup_threshold;		 //重删阈值：单位是size，初始size=8，即4KB
 
 	unsigned int token;                  //在动态分配中，为防止每次分配在第一个channel需要维持一个令牌，每次从令牌所指的位置开始分配
 	unsigned int gc_request;             //记录在SSD中，当前时刻有多少gc操作的请求
@@ -199,6 +206,10 @@ struct ssd_info{
 	unsigned int request_queue_length;
 	unsigned int update_read_count;      //记录因为更新操作导致的额外读出操作
 
+	// 重删相关参数
+	unsigned long duplicate_chunks;
+	unsigned long unique_chunks;
+
 	char parameterfilename[30];
 	char tracefilename[30];
 	char outputfilename[30];
@@ -212,13 +223,13 @@ struct ssd_info{
 
     struct parameter_value *parameter;   //SSD参数因子
 	struct dram_info *dram;
-	struct request *request_queue;       //dynamic request queue
-	struct request *request_tail;	     // the tail of the request queue
+	struct request *request_queue;       //动态请求队列
+	struct request *request_tail;	     //请求队列尾
 	struct sub_request *subs_w_head;     //当采用全动态分配时，分配是不知道应该挂载哪个channel上，所以先挂在ssd上，等进入process函数时才挂到相应的channel的读请求队列上
 	struct sub_request *subs_w_tail;
 	struct event_node *event;            //事件队列，每产生一个新的事件，按照时间顺序加到这个队列，在simulate函数最后，根据这个队列队首的时间，确定时间
 	struct channel_info *channel_head;   //指向channel结构体数组的首地址
-	struct hashTable* pageDatabase;      //存储页数据内容
+	struct ThresholdAdjuster *threshold_adjuster;
 };
 
 
@@ -296,10 +307,15 @@ struct blk_info{
 
 
 struct page_info{                      //lpn记录该物理页存储的逻辑页，当该逻辑页有效时，valid_state大于0，free_state大于0；
-	int valid_state;                   //indicate the page is valid or invalid
-	int free_state;                    //each bit indicates the subpage is free or occupted. 1 indicates that the bit is free and 0 indicates that the bit is used
+	int valid_state;                   //数据页有效位
+	int free_state;                    //1表示该页空闲，0表示该页已被使用
 	unsigned int lpn;                 
 	unsigned int written_count;        //记录该页被写的次数
+
+	char* data;						   //该页中存放的数据
+	char* hash_value;				   //该页数据对应的哈希值
+	int ref_count;					   //引用计数
+	int dedup_tag;					   //是否计算/计算过哈希值   1表示已计算或将要计算哈希值，0表示不计算哈希值
 };
 
 
@@ -411,6 +427,7 @@ struct event_node{
 	struct event_node *pre_node;
 };
 
+
 struct parameter_value{
 	unsigned int chip_num;          //记录一个SSD中有多少个颗粒
 	unsigned int dram_capacity;     //记录SSD中DRAM capacity
@@ -475,6 +492,7 @@ struct parameter_value{
 	struct ac_time_characteristics time_characteristics;
 };
 
+
 /********************************************************
 *mapping information,state的最高位表示是否有附加映射关系
 *********************************************************/
@@ -534,24 +552,6 @@ typedef struct Dram_write_map
 }Dram_write_map;
 
 
-/********************************
-* 哈希表设置，格式为 {ppn + data}
-*********************************/
-// 哈希表节点结构
-typedef struct pageData {
-	unsigned int ppn;
-	char* data;
-	struct pageData* next;  // 链地址法
-} pageData;
-
-// 哈希表结构
-typedef struct HashTable {
-	pageData** buckets;  // 指向桶数组
-	int capacity;        // 桶的数量
-	int size;            // 当前存储的键值对数量
-} HashTable;
-
-
 
 
 struct ssd_info *initiation(struct ssd_info *);
@@ -566,11 +566,4 @@ struct dram_info * initialize_dram(struct ssd_info * ssd);
 void request_assign(struct request* dest, const struct request* src);
 
 
-unsigned int hash_function(unsigned int ppn, int capacity);
-HashTable* create_hash_table(int capacity);
-void insert(HashTable* ht, unsigned int ppn, const char* data);
-char* find(HashTable* ht, unsigned int ppn);
-void erase(HashTable* ht, unsigned int ppn);
-void rehash(HashTable* ht);
-void print_hash_table(HashTable* ht);
-void free_hash_table(HashTable* ht);
+#endif

@@ -26,6 +26,7 @@ Zhiming Zhu     2012/07/19        2.1.1         Correct erase_planes()   8128398
 #include "ssd.h"
 #include "pagemap.h"
 #include "initialize.h"
+#include "hash.h"
 
 
 /**********************
@@ -726,10 +727,23 @@ struct sub_request * creat_sub_request(struct ssd_info * ssd,unsigned int lpn,in
 		}
 
 		/***********************************************************************************
-		*为子请求分配空间之后，将子请求中的数据块写入哈希表中。哈希表对应格式为{ppn + data}。
+		* 为子请求分配空间之后，将子请求中的数据块写入哈希表中。哈希表对应格式为{ppn + data}。
+		* 写入请求时进行在线重删：大于重删块阈值的数据标记为1，需要进行重删；否则标为0。
 		************************************************************************************/
 		ssd = get_ppn(ssd, sub->location->channel, sub->location->chip, sub->location->die, sub->location->plane, sub);
-		insert(ssd->pageDatabase, sub->ppn, sub->data);
+
+		// 根据动态阈值选择重删粒度。当阈值设为0时，所有块均会进行在线重删；当阈值设为256时，所有块均不进行重删。
+		if (req->size >= ssd->dedup_threshold) {
+
+			if (!insert_page(ssd, sub->data, sub->ppn, sub->lpn, 1)) {
+				printf("insert_page_1 failed. sub_req: %I64u %u %d 1 %s\n", sub->current_time, sub->lpn, sub->size, (sub->data) ? sub->data : "(null)");
+			}
+		}
+		else {
+			if (!insert_page(ssd, sub->data, sub->ppn, sub->lpn, 0)) {
+				printf("insert_page_0 failed. sub_req: %I64u %u %d 1 %s\n", sub->current_time, sub->lpn, sub->size, (sub->data) ? sub->data : "(null)");
+			}
+		}
 
 		//printf("sub_req: %I64u %u %d %u %s\n", sub->current_time, sub->lpn, sub->size, sub->operation, (sub->data) ? sub->data : "(null)");
 

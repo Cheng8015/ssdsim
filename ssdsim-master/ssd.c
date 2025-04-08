@@ -29,8 +29,11 @@ Zhiming Zhu     2012/07/19        2.1.1         Correct erase_planes()   8128398
 #include "initialize.h"
 #include "pagemap.h"
 #include "flash.h"
+#include "hash.h"
+#include "dynamicThreshold.h"
 
-#define MAX_LINE_LENGTH 10000
+#define MAX_LINE_LENGTH		10000				// 单行请求的最大长度
+#define ADJUST_FREQUENCY	1000				// 动态调整阈值的频率，每 xx 条请求调整一次
 
 /********************************************************************************************************************************
 1，main函数中initiation()函数用来初始化ssd,；2，make_aged()函数使SSD成为aged，aged的ssd相当于使用过一段时间的ssd，里面有失效页，
@@ -76,6 +79,7 @@ void main()
 	statistic_output(ssd);  
 	printf("The statistics analysis completed!\n");
 
+
 	//free_all_node(ssd);
 	system("pause");
 /* 	_CrtDumpMemoryLeaks(); */
@@ -83,17 +87,17 @@ void main()
 
 
 /******************simulate() *********************************************************************
-*simulate()是核心处理函数，主要实现的功能包括
-*1,从trace文件中获取一条请求，挂到ssd->request
-*2，根据ssd是否有dram分别处理读出来的请求，把这些请求处理成为读写子请求，挂到ssd->channel或者ssd上
-*3，按照事件的先后来处理这些读写子请求。
-*4，输出每条请求的子请求都处理完后的相关信息到outputfile文件中
+* simulate()是核心处理函数，主要实现的功能包括
+* 1. 从trace文件中获取一条请求，挂到ssd->request
+* 2. 根据ssd是否有dram分别处理读出来的请求，把这些请求处理成为读写子请求，挂到ssd->channel或者ssd上
+* 3. 按照事件的先后来处理这些读写子请求。
+* 4. 输出每条请求的子请求都处理完后的相关信息到outputfile文件中
 **************************************************************************************************/
 struct ssd_info *simulate(struct ssd_info *ssd)
 {
-	int flag=1,flag1=0;
-	double output_step=0;
-	unsigned int a=0,b=0;
+	int flag = 1, flag1 = 0;
+	__int64 last_time = 1;
+	long long last_write_avg = 1000;
 	errno_t err;
 
 	printf("\n");
@@ -101,6 +105,8 @@ struct ssd_info *simulate(struct ssd_info *ssd)
 	printf("\n");
 	printf("\n");
 	printf("   ^o^    OK, please wait a moment, and enjoy music and coffee   ^o^    \n");
+	printf("\n");
+	printf("\n");
 
 	if((err=fopen_s(&(ssd->tracefile),ssd->tracefilename,"r"))!=0)
 	{  
@@ -141,6 +147,21 @@ struct ssd_info *simulate(struct ssd_info *ssd)
 		
 		process(ssd);    
 		trace_output(ssd);
+
+		//每处理{ADJUST_FREQUENCY}条请求就调整一次选择性重删的阈值
+		/*
+		if (ssd->read_request_count + ssd->write_request_count % 200 == 0) {
+
+			//忽略前期的写入
+			if (flag1 > 15) {
+				update_threshold(ssd, last_time, last_write_avg);
+			}
+			last_time = ssd->current_time;
+			last_write_avg = ssd->write_avg;
+			flag1++;
+		}
+		*/
+
 		if(flag == 0 && ssd->request_queue == NULL)
 			flag = 100;
 	}
@@ -156,10 +177,10 @@ struct ssd_info *simulate(struct ssd_info *ssd)
 *	return	0: reach the end of the trace
 *			-1: no request has been added
 *			1: add one request to list
-*SSD模拟器有三种驱动方式:时钟驱动(精确，太慢) 事件驱动(本程序采用) trace驱动()，
-*两种方式推进事件：channel/chip状态改变、trace文件请求达到。
-*channel/chip状态改变和trace文件请求到达是散布在时间轴上的点，每次从当前状态到达
-*下一个状态都要到达最近的一个状态，每到达一个点执行一次process
+* SSD模拟器有三种驱动方式:时钟驱动(精确，太慢) 事件驱动(本程序采用) trace驱动()，
+* 两种方式推进事件：channel/chip状态改变、trace文件请求达到。
+* channel/chip状态改变和trace文件请求到达是散布在时间轴上的点，每次从当前状态到达
+* 下一个状态都要到达最近的一个状态，每到达一个点执行一次process
 ********************************************************************************/
 int get_requests(struct ssd_info *ssd)  
 {  
@@ -278,7 +299,7 @@ int get_requests(struct ssd_info *ssd)
 		}
 		else
 		{
-			if (ssd->request_queue_length>=ssd->parameter->queue_length)
+			if (ssd->request_queue_length>=(unsigned int)ssd->parameter->queue_length)
 			{
 				fseek(ssd->tracefile,filepoint,0);
 				ssd->current_time=nearest_event_time;
@@ -388,9 +409,9 @@ int get_requests(struct ssd_info *ssd)
 
 
 /**********************************************************************************************************************************************
-*首先buffer是个写buffer，就是为写请求服务的，因为读flash的时间tR为20us，写flash的时间tprog为200us，所以为写服务更能节省时间
-*  读操作：如果命中了buffer，从buffer读，不占用channel的I/O总线，没有命中buffer，从flash读，占用channel的I/O总线，但是不进buffer了
-*  写操作：首先request分成sub_request子请求，如果是动态分配，sub_request挂到ssd->sub_request上，因为不知道要先挂到哪个channel的sub_request上
+* 首先buffer是个写buffer，就是为写请求服务的，因为读flash的时间tR为20us，写flash的时间tprog为200us，所以为写服务更能节省时间
+*   读操作：如果命中了buffer，从buffer读，不占用channel的I/O总线，没有命中buffer，从flash读，占用channel的I/O总线，但是不进buffer了
+*   写操作：首先request分成sub_request子请求，如果是动态分配，sub_request挂到ssd->sub_request上，因为不知道要先挂到哪个channel的sub_request上
 *          如果是静态分配则sub_request挂到channel的sub_request链上,同时不管动态分配还是静态分配sub_request都要挂到request的sub_request链上
 *		   因为每处理完一个request，都要在traceoutput文件中输出关于这个request的信息。处理完一个sub_request,就将其从channel的sub_request链
 *		   或ssd的sub_request链上摘除，但是在traceoutput文件输出一条后再清空request的sub_request链。
@@ -398,7 +419,7 @@ int get_requests(struct ssd_info *ssd)
 *		   写入flash(这会产生一个sub_request写请求，挂到这个请求request的sub_request链上，同时视动态分配还是静态分配挂到channel或ssd的
 *		   sub_request链上),在将要写的sub_page写入buffer链头
 ***********************************************************************************************************************************************/
-struct ssd_info *buffer_management(struct ssd_info *ssd)
+struct ssd_info* buffer_management(struct ssd_info* ssd)
 {   
 	unsigned int j,lsn,lpn,last_lpn,first_lpn,index,complete_flag=0, state,full_page;
 	unsigned int flag=0,need_distb_flag,lsn_flag,flag1=1,active_region_flag=0;           
@@ -544,28 +565,12 @@ struct ssd_info *buffer_management(struct ssd_info *ssd)
 }
 
 
-/**********************
-*dram中：lsn向ppn的转换
-***********************/
-unsigned int lsn2ppn(struct ssd_info *ssd,unsigned int lsn)
-{
-	int lpn, ppn;	
-	struct entry *p_map = ssd->dram->map->map_entry;
-#ifdef DEBUG
-	printf("enter lpn2ppn,  current time:%I64u\n",ssd->current_time);
-#endif
-	lpn = lsn/ssd->parameter->subpage_page;			//lsn->lpn
-	ppn = (p_map[lpn]).pn;
-	return ppn;
-}
-
-
-/**********************************************************************************
-*读请求分配子请求函数，这里只处理读请求，写请求已经在buffer_management()函数中处理了
-*根据请求队列和buffer命中的检查，将每个请求分解成子请求，将子请求队列挂在channel上，
-*不同的channel有自己的子请求队列
-**********************************************************************************/
-struct ssd_info *distribute(struct ssd_info *ssd) 
+/******************************************************************************************************
+* distribute()函数是读请求分配子请求函数，这里只处理读请求，写请求已经在buffer_management()函数中处理了
+* 根据请求队列和buffer命中的检查，将每个请求分解成子请求，将子请求队列挂在channel上，
+* 不同的channel有自己的子请求队列
+*******************************************************************************************************/
+struct ssd_info* distribute(struct ssd_info* ssd) 
 {
 	unsigned int start, end, first_lsn,last_lsn,lpn,flag=0,flag_attached=0,full_page;
 	unsigned int j, k, sub_size;
@@ -643,9 +648,113 @@ struct ssd_info *distribute(struct ssd_info *ssd)
 }
 
 
+/*********************************************************************************************
+* no_buffer_distribute()函数是处理当ssd没有dram的时候，
+* 这是读写请求就不必再需要在buffer里面寻找，直接利用creat_sub_request()函数创建子请求，再处理。
+*********************************************************************************************/
+struct ssd_info* no_buffer_distribute(struct ssd_info* ssd)
+{
+	unsigned int lsn, lpn, last_lpn, first_lpn, complete_flag = 0, state;
+	unsigned int flag = 0, flag1 = 1, active_region_flag = 0;           //to indicate the lsn is hitted or not
+	struct request* req = NULL;
+	struct sub_request* sub = NULL, * sub_r = NULL, * update = NULL;
+	struct local* loc = NULL;
+	struct channel_info* p_ch = NULL;
+
+
+	unsigned int mask = 0;
+	unsigned int offset1 = 0, offset2 = 0;
+	unsigned int sub_size = 0;
+	unsigned int sub_state = 0;
+
+	//printf("req_tail: %I64u %u %d %d %s\n", ssd->request_tail->time, ssd->request_tail->lsn, ssd->request_tail->size, 
+		//							ssd->request_tail->operation, (ssd->request_tail->data) ? ssd->request_tail->data : "(null)");
+
+	ssd->dram->current_time = ssd->current_time;
+	req = ssd->request_tail;
+	lsn = req->lsn;
+	lpn = req->lsn / ssd->parameter->subpage_page;
+	last_lpn = (req->lsn + req->size - 1) / ssd->parameter->subpage_page;
+	first_lpn = req->lsn / ssd->parameter->subpage_page;
+
+	if (req->operation == READ)
+	{
+		while (lpn <= last_lpn)
+		{
+			sub_state = (ssd->dram->map->map_entry[lpn].state & 0x7fffffff);
+			sub_size = size(sub_state);
+			sub = creat_sub_request(ssd, lpn, sub_size, sub_state, req, req->operation);
+			lpn++;
+		}
+	}
+	else if (req->operation == WRITE)
+	{
+		while (lpn <= last_lpn)
+		{
+			mask = ~(0xffffffff << (ssd->parameter->subpage_page));
+			state = mask;
+			if (lpn == first_lpn)
+			{
+				offset1 = ssd->parameter->subpage_page - ((lpn + 1) * ssd->parameter->subpage_page - req->lsn);
+				state = state & (0xffffffff << offset1);
+			}
+			if (lpn == last_lpn)
+			{
+				offset2 = ssd->parameter->subpage_page - ((lpn + 1) * ssd->parameter->subpage_page - (req->lsn + req->size));
+				state = state & (~(0xffffffff << offset2));
+			}
+			sub_size = size(state);
+
+			sub = creat_sub_request(ssd, lpn, sub_size, state, req, req->operation);
+			lpn++;
+
+
+			//printf("req: %I64u %u %u %d %d %s\n", req->time, req->lsn, lpn, req->size, req->operation, (req->data) ? req->data : "(null)");
+
+		}
+	}
+
+	return ssd;
+}
+
+
+/*****************************************************************************
+* update_threshold()函数是更新选择性重删阈值的函数。
+* 每隔n条请求，根据系统性能，计算系统评分，调整阈值：S越大，阈值越大。
+* 参数说明：
+*	 L_norm - 归一化的I/O延迟指标（数值范围假设为0~1，数值越大表示延迟越高）
+*	 C_norm - 归一化的IOPS指标（0~1）
+*	 W_norm - 归一化的写请求队列延迟或队列长度指标（0~1）
+*	 D_norm - 归一化的重删收益率（0~1，数值越高表示空间节省效果越好）
+* 计算综合评分 S = w1 * L_norm + w2 * C_norm + w3 * W_norm - w4 * D_norm
+******************************************************************************/
+struct ssd_info* update_threshold(struct ssd_info* ssd, __int64 last_time, long long last_write_avg) {
+
+	// 计算当前时间窗内的系统性能：响应时间、IOPS、请求队列长度、容量
+	double l_norm = 0.0, c_norm = 0.0, w_norm = 0.0, d_norm = 0.0;
+
+	l_norm = (double)(ssd->write_avg - last_write_avg) / last_write_avg;
+	c_norm = (double)(ssd->current_time - last_time) / last_time;
+	w_norm = (double)ssd->request_queue_length / REQUEST_QUEUE_LENGTH;
+	d_norm = (double)ssd->duplicate_chunks / (ssd->duplicate_chunks + ssd->unique_chunks);
+	
+	unsigned int adjusted_threshold = adjustThreshold(ssd->threshold_adjuster,l_norm, c_norm, w_norm, d_norm, 0.4, 0.3, 0.2, 0.1);
+
+	if (ssd->dedup_threshold != adjusted_threshold) {
+		ssd->dedup_threshold = adjusted_threshold;
+		printf("The threshold is changed to %u (%u KB).\n", ssd->dedup_threshold, ssd->dedup_threshold / 2);
+	}
+	
+	//double s = 0.2 * l_norm + 0.2 * c_norm + 0.2 * w_norm - 0.4 * d_norm;
+	//printf("%.5lf, %.5lf, %.5lf, %.5lf, %.5lf\n", l_norm, c_norm, w_norm, d_norm, s);
+
+	return ssd;
+}
+
+
 /**********************************************************************
-*trace_output()函数是在每一条请求的所有子请求经过process()函数处理完后，
-*打印输出相关的运行结果到outputfile文件中，这里的结果主要是运行的时间
+* trace_output()函数是在每一条请求的所有子请求经过process()函数处理完后，
+* 打印输出相关的运行结果到outputfile文件中，这里的结果主要是运行的时间
 **********************************************************************/
 void trace_output(struct ssd_info* ssd){
 	int flag = 1;	
@@ -864,10 +973,10 @@ void trace_output(struct ssd_info* ssd){
 
 
 /*******************************************************************************
-*statistic_output()函数主要是输出处理完一条请求后的相关处理信息。
-*1，计算出每个plane的擦除次数即plane_erase和总的擦除次数即erase
-*2，打印min_lsn，max_lsn，read_count，program_count等统计信息到文件outputfile中。
-*3，打印相同的信息到文件statisticfile中
+* statistic_output()函数主要是输出处理完一条请求后的相关处理信息。
+* 1. 计算出每个plane的擦除次数即plane_erase和总的擦除次数即erase
+* 2. 打印min_lsn，max_lsn，read_count，program_count等统计信息到文件outputfile中。
+* 3. 打印相同的信息到文件statisticfile中
 *******************************************************************************/
 void statistic_output(struct ssd_info* ssd)
 {
@@ -985,6 +1094,11 @@ void statistic_output(struct ssd_info* ssd)
 	fprintf(ssd->statisticfile, "buffer write hits: %13d\n", ssd->dram->buffer->write_hit);
 	fprintf(ssd->statisticfile, "buffer write miss: %13d\n", ssd->dram->buffer->write_miss_hit);
 	fprintf(ssd->statisticfile, "erase: %13d\n", erase);
+
+	// 补充重删部分的输出
+	fprintf(ssd->statisticfile, "duplicate chunks: %13lu\n", ssd->duplicate_chunks);
+	fprintf(ssd->statisticfile, "unique chunks: %13lu\n", ssd->unique_chunks);
+	fprintf(ssd->statisticfile, "deduplication ratio: %10.3f\n", ssd->unique_chunks != 0 ? (double)(ssd->duplicate_chunks + ssd->unique_chunks) / ssd->unique_chunks : 0.0);
 	fflush(ssd->statisticfile);
 
 	fclose(ssd->statisticfile);
@@ -992,9 +1106,28 @@ void statistic_output(struct ssd_info* ssd)
 }
 
 
-/***********************************************************************************
-*根据每一页的状态计算出每一需要处理的子页的数目，也就是一个子请求需要处理的子页的页数
-************************************************************************************/
+
+
+//----------------------------------------------------------------------------------------------------------//
+/**********************
+* dram中：lsn向ppn的转换
+***********************/
+unsigned int lsn2ppn(struct ssd_info* ssd, unsigned int lsn)
+{
+	int lpn, ppn;
+	struct entry* p_map = ssd->dram->map->map_entry;
+#ifdef DEBUG
+	printf("enter lpn2ppn,  current time:%I64u\n", ssd->current_time);
+#endif
+	lpn = lsn / ssd->parameter->subpage_page;			//lsn->lpn
+	ppn = (p_map[lpn]).pn;
+	return ppn;
+}
+
+
+/**************************************************************************************
+* 根据每一页的状态计算出每一需要处理的子页的数目，也就是一个子请求需要处理的子页的页数
+***************************************************************************************/
 unsigned int size(unsigned int stored)
 {
 	unsigned int i,total=0,mask=0x80000000;
@@ -1014,12 +1147,12 @@ unsigned int size(unsigned int stored)
 }
 
 
-/*********************************************************
-*transfer_size()函数的作用就是计算出子请求的需要处理的size
-*函数中单独处理了first_lpn，last_lpn这两个特别情况，因为这
-*两种情况下很有可能不是处理一整页而是处理一页的一部分，因
-*为lsn有可能不是一页的第一个子页。
-*********************************************************/
+/**********************************************************
+* transfer_size()函数的作用就是计算出子请求的需要处理的size
+* 函数中单独处理了first_lpn，last_lpn这两个特别情况，因为这
+* 两种情况下很有可能不是处理一整页而是处理一页的一部分，因
+* 为lsn有可能不是一页的第一个子页。
+***********************************************************/
 unsigned int transfer_size(struct ssd_info *ssd,int need_distribute,unsigned int lpn,struct request *req)
 {
 	unsigned int first_lpn,last_lpn,state,trans_size;
@@ -1047,14 +1180,14 @@ unsigned int transfer_size(struct ssd_info *ssd,int need_distribute,unsigned int
 }
 
 
-/**********************************************************************************************************  
-*__int64 find_nearest_event(struct ssd_info *ssd)       
-*寻找所有子请求的最早到达的下个状态时间,首先看请求的下一个状态时间，如果请求的下个状态时间小于等于当前时间，
-*说明请求被阻塞，需要查看channel或者对应die的下一状态时间。Int64是有符号 64 位整数数据类型，值类型表示值介于
-*-2^63 ( -9,223,372,036,854,775,808)到2^63-1(+9,223,372,036,854,775,807 )之间的整数。存储空间占 8 字节。
-*channel,die是事件向前推进的关键因素，三种情况可以使事件继续向前推进，channel，die分别回到idle状态，die中的
-*读数据准备好了
-***********************************************************************************************************/
+/***********************************************************************************************************  
+* __int64 find_nearest_event(struct ssd_info *ssd)       
+* 寻找所有子请求的最早到达的下个状态时间,首先看请求的下一个状态时间，如果请求的下个状态时间小于等于当前时间，
+* 说明请求被阻塞，需要查看channel或者对应die的下一状态时间。Int64是有符号 64 位整数数据类型，值类型表示值介于
+* -2^63 ( -9,223,372,036,854,775,808)到2^63-1(+9,223,372,036,854,775,807 )之间的整数。存储空间占 8 字节。
+* channel,die是事件向前推进的关键因素，三种情况可以使事件继续向前推进，channel，die分别回到idle状态，die中的
+* 读数据准备好了
+************************************************************************************************************/
 __int64 find_nearest_event(struct ssd_info *ssd) 
 {
 	unsigned int i,j;
@@ -1089,9 +1222,9 @@ __int64 find_nearest_event(struct ssd_info *ssd)
 }
 
 
-/***********************************************
-*free_all_node()函数的作用就是释放所有申请的节点
-************************************************/
+/************************************************
+* free_all_node()函数的作用就是释放所有申请的节点
+*************************************************/
 void free_all_node(struct ssd_info *ssd)
 {
 	unsigned int i,j,k,l,n;
@@ -1151,8 +1284,8 @@ void free_all_node(struct ssd_info *ssd)
 
 
 /*****************************************************************************
-*make_aged()函数的作用就死模拟真实的用过一段时间的ssd，
-*那么这个ssd的相应的参数就要改变，所以这个函数实质上就是对ssd中各个参数的赋值。
+* make_aged()函数的作用就死模拟真实的用过一段时间的ssd，
+* 那么这个ssd的相应的参数就要改变，所以这个函数实质上就是对ssd中各个参数的赋值。
 ******************************************************************************/
 struct ssd_info *make_aged(struct ssd_info *ssd)
 {
@@ -1195,76 +1328,6 @@ struct ssd_info *make_aged(struct ssd_info *ssd)
 	else
 	{
 		return ssd;
-	}
-
-	return ssd;
-}
-
-
-/*********************************************************************************************
-*no_buffer_distribute()函数是处理当ssd没有dram的时候，
-*这是读写请求就不必再需要在buffer里面寻找，直接利用creat_sub_request()函数创建子请求，再处理。
-*********************************************************************************************/
-struct ssd_info *no_buffer_distribute(struct ssd_info *ssd)
-{
-	unsigned int lsn,lpn,last_lpn,first_lpn,complete_flag=0, state;
-	unsigned int flag=0,flag1=1,active_region_flag=0;           //to indicate the lsn is hitted or not
-	struct request *req=NULL;
-	struct sub_request *sub=NULL,*sub_r=NULL,*update=NULL;
-	struct local *loc=NULL;
-	struct channel_info *p_ch=NULL;
-
-	
-	unsigned int mask=0; 
-	unsigned int offset1=0, offset2=0;
-	unsigned int sub_size=0;
-	unsigned int sub_state=0;
-
-	//printf("req_tail: %I64u %u %d %d %s\n", ssd->request_tail->time, ssd->request_tail->lsn, ssd->request_tail->size, 
-		//							ssd->request_tail->operation, (ssd->request_tail->data) ? ssd->request_tail->data : "(null)");
-
-	ssd->dram->current_time=ssd->current_time;
-	req=ssd->request_tail;       
-	lsn=req->lsn;
-	lpn=req->lsn/ssd->parameter->subpage_page;
-	last_lpn=(req->lsn+req->size-1)/ssd->parameter->subpage_page;
-	first_lpn=req->lsn/ssd->parameter->subpage_page;
-
-	if(req->operation==READ)        
-	{		
-		while(lpn<=last_lpn) 		
-		{
-			sub_state=(ssd->dram->map->map_entry[lpn].state&0x7fffffff);
-			sub_size=size(sub_state);
-			sub=creat_sub_request(ssd,lpn,sub_size,sub_state,req,req->operation);
-			lpn++;
-		}
-	}
-	else if(req->operation==WRITE)
-	{
-		while(lpn<=last_lpn)     	
-		{	
-			mask=~(0xffffffff<<(ssd->parameter->subpage_page));
-			state=mask;
-			if(lpn==first_lpn)
-			{
-				offset1=ssd->parameter->subpage_page-((lpn+1)*ssd->parameter->subpage_page-req->lsn);
-				state=state&(0xffffffff<<offset1);
-			}
-			if(lpn==last_lpn)
-			{
-				offset2=ssd->parameter->subpage_page-((lpn+1)*ssd->parameter->subpage_page-(req->lsn+req->size));
-				state=state&(~(0xffffffff<<offset2));
-			}
-			sub_size=size(state);
-			
-			sub=creat_sub_request(ssd,lpn,sub_size,state,req,req->operation);
-			lpn++;
-
-			
-			//printf("req: %I64u %u %u %d %d %s\n", req->time, req->lsn, lpn, req->size, req->operation, (req->data) ? req->data : "(null)");
-
-		}
 	}
 
 	return ssd;

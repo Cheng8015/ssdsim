@@ -129,14 +129,18 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="ssdsim-master\avlTree.c" />
+    <ClCompile Include="ssdsim-master\dynamicThreshold.cpp" />
     <ClCompile Include="ssdsim-master\flash.c" />
+    <ClCompile Include="ssdsim-master\hash.cpp" />
     <ClCompile Include="ssdsim-master\initialize.c" />
     <ClCompile Include="ssdsim-master\pagemap.c" />
     <ClCompile Include="ssdsim-master\ssd.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ssdsim-master\avlTree.h" />
+    <ClInclude Include="ssdsim-master\dynamicThreshold.h" />
     <ClInclude Include="ssdsim-master\flash.h" />
+    <ClInclude Include="ssdsim-master\hash.h" />
     <ClInclude Include="ssdsim-master\initialize.h" />
     <ClInclude Include="ssdsim-master\pagemap.h" />
     <ClInclude Include="ssdsim-master\ssd.h" />

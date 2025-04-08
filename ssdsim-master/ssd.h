@@ -18,16 +18,18 @@ Zhiming Zhu     2012/07/19        2.1.1         Correct erase_planes()   8128398
 *****************************************************************************************************************************/
 
 void main();
-struct ssd_info *simulate(struct ssd_info *);
-int get_requests(struct ssd_info *);
-struct ssd_info *buffer_management(struct ssd_info *);
-unsigned int lsn2ppn(struct ssd_info * ,unsigned int lsn);
-struct ssd_info *distribute(struct ssd_info *);
+struct ssd_info* simulate(struct ssd_info* );
+int get_requests(struct ssd_info* );
+struct ssd_info* buffer_management(struct ssd_info* );
+struct ssd_info* distribute(struct ssd_info* );
+struct ssd_info* no_buffer_distribute(struct ssd_info* );
+struct ssd_info* update_threshold(struct ssd_info* ssd, __int64 last_time, long long last_write_avg);
 void trace_output(struct ssd_info* );
-void statistic_output(struct ssd_info *);
+void statistic_output(struct ssd_info* );
+
+unsigned int lsn2ppn(struct ssd_info* , unsigned int lsn);
 unsigned int size(unsigned int);
-unsigned int transfer_size(struct ssd_info *,int,unsigned int,struct request *);
-__int64 find_nearest_event(struct ssd_info *);
-void free_all_node(struct ssd_info *);
-struct ssd_info *make_aged(struct ssd_info *);
-struct ssd_info *no_buffer_distribute(struct ssd_info *);
+unsigned int transfer_size(struct ssd_info* ,int,unsigned int,struct request *);
+__int64 find_nearest_event(struct ssd_info* );
+void free_all_node(struct ssd_info* );
+struct ssd_info* make_aged(struct ssd_info* );
